@@ -293,6 +293,23 @@ final class MetricsRepository: ObservableObject {
         }
     }
 
+    /// Fetch the windowed SpO₂ TREND (%) for an epoch-second window, mapped to TrendPoints
+    /// for the chart. Quality-gated server-side: motion/low-perfusion samples are already
+    /// excluded. Returns [] on error, unconfigured, or when all windows are rejected.
+    /// Values are APPROXIMATE (ratio-of-ratios, uncalibrated) — useful as relative trend only.
+    func spo2Series(fromEpoch: Int, toEpoch: Int) async -> [TrendPoint] {
+        await ensureOpen()
+        guard let serverSync else { return [] }
+        let raw = await serverSync.getSpo2Series(fromEpoch: fromEpoch, toEpoch: toEpoch)
+        return raw.map { pair in
+            TrendPoint(
+                id: "\(pair.ts)",
+                date: Date(timeIntervalSince1970: TimeInterval(pair.ts)),
+                value: pair.pct
+            )
+        }
+    }
+
     // MARK: - Workouts (M5)
 
     /// Fetches auto-detected workout bouts from the server for the given date range.

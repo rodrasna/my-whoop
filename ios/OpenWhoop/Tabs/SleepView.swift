@@ -435,12 +435,27 @@ struct SleepView: View {
                     )
                 }
 
-                MetricCard(
-                    title: "SpO₂",
-                    value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
-                    unit: daily?.spo2Pct != nil ? "%" : nil,
-                    accentColor: daily?.spo2Pct != nil ? WH.Color.textPrimary : WH.Color.textSecondary
-                )
+                // SpO₂: tendencia por instante (ratio-of-ratios, con gate de calidad) → pulsable.
+                if let session {
+                    NavigationLink(destination: SleepSpo2ChartView(session: session)) {
+                        MetricCard(
+                            title: "Saturación de oxígeno",
+                            value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
+                            unit: daily?.spo2Pct != nil ? "%" : nil,
+                            accentColor: daily?.spo2Pct != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
+                        ) {
+                            chartHint
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    MetricCard(
+                        title: "Saturación de oxígeno",
+                        value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
+                        unit: daily?.spo2Pct != nil ? "%" : nil,
+                        accentColor: daily?.spo2Pct != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
+                    )
+                }
 
                 // Temperatura de piel: desviación respecto a mediana de la noche → pulsable.
                 if let session {

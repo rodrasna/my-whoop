@@ -228,6 +228,18 @@ def get_temp_series(device: str,
         return read.query_temp_series(conn, device_id=device, start=from_, end=to)
 
 
+@app.get("/v1/spo2-series", dependencies=[Depends(require_auth)])
+def get_spo2_series(device: str,
+                    from_: int = Query(0, alias="from"),
+                    to: int = Query(2_000_000_000, alias="to")):
+    """Windowed SpO₂ TREND (%) from the spo2_samples table in [from, to] (unix seconds).
+    Returns [{ts, value, unit}] where unit="%"; empty when no rows or all windows are
+    rejected by the perfusion quality gate (motion artefact, flat signal, off-wrist).
+    APPROXIMATION — ratio-of-ratios estimator, NOT calibrated; useful as a relative trend only."""
+    with psycopg.connect(cfg.db_dsn) as conn:
+        return read.query_spo2_series(conn, device_id=device, start=from_, end=to)
+
+
 # ── Daily analysis endpoints (Task 2.5) ──────────────────────────────────────
 
 class ComputeDaily(BaseModel):

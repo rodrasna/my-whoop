@@ -12,6 +12,7 @@ from .analysis.units import (
     skin_temp_series_from_raw,
     spo2_percent,
     spo2_percent_window,
+    spo2_series_from_samples,
 )
 
 # Rolling-window radius (samples each side) for the windowed SpO2 estimator.
@@ -228,6 +229,37 @@ def query_temp_series(conn, device_id, start, end):
     pairs = [(float(r[0]), float(r[1])) for r in rows if r[1] is not None]
     series = skin_temp_series_from_raw(pairs)
     return [{"ts": ts, "value": delta, "unit": "Δ°C"} for ts, delta in series]
+
+
+def query_spo2_series(conn, device_id, start, end):
+    """Windowed SpO₂ TREND (%) from spo2_samples in [start, end] (unix seconds).
+
+    Queries the raw red/ir ADC columns, builds (ts, red, ir) triples, applies the
+    windowed ratio-of-ratios estimator (spo2_series_from_samples), and returns only
+    samples that passed the perfusion quality gate. Windows rejected by the gate
+    (motion artefact, flat signal, off-wrist) are silently discarded — no gap-fill.
+
+    Returns [{ts, value, unit}] with ts as unix seconds and unit="%".
+    Returns [] when there are no rows in the window or all windows are rejected.
+
+    APPROXIMATION: SpO₂ is estimated from reflectance red/IR ratios using the
+    TI SLAA655 textbook formula (SpO₂ = 110 − 25·R). NOT calibrated against a
+    reference oximeter. Useful as a RELATIVE TREND (detecting desaturation episodes)
+    only — not as a clinical absolute value.
+    """
+    rows = conn.execute(
+        "SELECT extract(epoch FROM ts), red, ir FROM spo2_samples "
+        "WHERE device_id = %s AND ts >= to_timestamp(%s) AND ts <= to_timestamp(%s) "
+        "ORDER BY ts",
+        (device_id, start, end),
+    ).fetchall()
+    triples = [
+        (float(r[0]), float(r[1]), float(r[2]))
+        for r in rows
+        if r[1] is not None and r[2] is not None
+    ]
+    series = spo2_series_from_samples(triples)
+    return [{"ts": ts, "value": pct, "unit": "%"} for ts, pct in series]
 
 
 def counts(conn, device_id, start, end):

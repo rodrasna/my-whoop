@@ -590,6 +590,73 @@ def skin_temp_series_from_raw(
     ]
 
 
+def spo2_series_from_samples(
+    red_ir_pairs: "Sequence[tuple[float, float, float]]",
+    *,
+    window_radius: int = 8,
+    step_s: float = 1.0,
+) -> "list[tuple[int, float]]":
+    """APPROXIMATE — windowed SpO₂ TREND (%) from a sequence of (ts_unix, red, ir) triples.
+
+    For each sample at index i (sorted by ts), takes a centered window of
+    ±window_radius samples, calls spo2_feature_window() to get the ratio-of-ratios R,
+    applies _spo2_from_R() to convert R → SpO₂ %, and keeps the result only if
+    spo2_feature_window() returned a valid R (i.e. the quality gate passed).
+
+    Quality gate: spo2_feature_window() returns None when:
+      - Perfusion index (AC/DC) of either channel exceeds _SPO2_PERFUSION_CEILING → motion
+      - IR channel is flat or DC ≤ 0 → sensor off-wrist / saturated
+      - Window has fewer than 2 samples
+
+    When the gate rejects a window, that sample is DISCARDED — no interpolation,
+    no filling. This mirrors the design requirement: honest data only.
+
+    Args:
+        red_ir_pairs: time-ordered (ts_seconds, red_adc, ir_adc) triples from
+                      spo2_samples. ts must be numeric (unix epoch seconds).
+        window_radius: half-width of the centered window in samples (default 8;
+                       matches _SPO2_WINDOW_RADIUS in read.py). Total window = 2*r+1.
+        step_s:       unused — reserved for future stride control. Currently every
+                      sample that passes the gate produces one output point.
+
+    Returns:
+        [(center_ts_unix, spo2_pct), ...] — one point per accepted sample, sorted
+        ascending by ts. Returns [] when red_ir_pairs is empty or all windows are
+        rejected.
+
+    Notes:
+        Unit string for callers: "%" (estimated, uncalibrated; useful as TREND only).
+    """
+    triples = [
+        (float(ts), float(red), float(ir))
+        for ts, red, ir in red_ir_pairs
+        if red is not None and ir is not None
+    ]
+    if not triples:
+        return []
+    triples.sort(key=lambda p: p[0])
+
+    n = len(triples)
+    reds = [r for _, r, _ in triples]
+    irs  = [ir for _, _, ir in triples]
+
+    out: list[tuple[int, float]] = []
+    for i in range(n):
+        lo = max(0, i - window_radius)
+        hi = min(n, i + window_radius + 1)
+        win_red = reds[lo:hi]
+        win_ir  = irs[lo:hi]
+
+        R = spo2_feature_window(win_red, win_ir)
+        if R is None:
+            continue  # quality gate rejected → discard this sample
+
+        pct = _spo2_from_R(R)
+        out.append((int(round(triples[i][0])), round(pct, 1)))
+
+    return out
+
+
 def resp_rate_bpm(raw: float) -> float:
     """
     APPROXIMATE — single-sample legacy interface: convert a raw ADC/sensor count

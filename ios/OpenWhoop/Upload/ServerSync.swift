@@ -584,6 +584,32 @@ final class ServerSync {
         }
     }
 
+    // MARK: - SpO₂ trend (ratio-of-ratios, windowed, quality-gated)
+
+    /// GET /v1/spo2-series?device=<deviceId>&from=<from>&to=<to>
+    /// Returns an array of (ts: epoch Int, pct: Double) — the windowed SpO₂ estimate (%)
+    /// over the window, with motion/low-perfusion windows already discarded server-side.
+    /// Empty on any network/parse error or when all windows are rejected by the quality gate.
+    func getSpo2Series(fromEpoch: Int, toEpoch: Int) async -> [(ts: Int, pct: Double)] {
+        let path = "/v1/spo2-series?device=\(deviceId)&from=\(fromEpoch)&to=\(toEpoch)"
+        guard let body = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: body)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { r -> (ts: Int, pct: Double)? in
+            let ts: Int?
+            if let tsStr = r["ts"] as? String {
+                ts = ServerSync.parseEpoch(tsStr)
+            } else if let n = r["ts"] as? NSNumber {
+                ts = n.intValue
+            } else {
+                ts = nil
+            }
+            guard let t = ts, let v = (r["value"] as? NSNumber)?.doubleValue else { return nil }
+            return (ts: t, pct: v)
+        }
+    }
+
     // MARK: - Workout calorie backfill
 
     /// POST /v1/backfill-workouts {device, from, to} (YYYY-MM-DD UTC).
