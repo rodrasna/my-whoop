@@ -472,6 +472,124 @@ def _resp_rate_nk2_xcorr(arr: np.ndarray, *, fs: float = 1.0) -> Optional[float]
         return _resp_rate_welch(arr, fs=fs)
 
 
+def resp_rate_series_from_rr(
+    rr_pairs: Sequence[tuple[float, float]],
+    *,
+    window_s: float = 180.0,
+    step_s: float = 60.0,
+    resample_hz: float = 4.0,
+) -> list[tuple[int, float]]:
+    """APPROXIMATE — respiratory-rate TREND (BrPM) over time from the beat-to-beat
+    RR-interval series, via respiratory sinus arrhythmia (RSA).
+
+    RSA: breathing modulates the RR tachogram (HR rises on inspiration, falls on
+    expiration). We reconstruct a beat-accurate tachogram from cumulative RR,
+    resample it to a uniform grid, and run a Welch PSD over sliding windows,
+    taking the peak in the respiratory band (0.1–0.5 Hz) as the breathing rate.
+
+    This is the recommended per-instant path (better-grounded than the raw resp
+    ADC) and needs NO per-user calibration — pure signal processing.
+
+    Args:
+        rr_pairs:   time-ordered (ts_seconds, rr_ms) pairs. ts anchors the series
+                    on the wall clock; the tachogram itself is built from RR.
+        window_s:   sliding-window length in seconds (default 180 = 3 min).
+        step_s:     hop between windows in seconds (default 60).
+        resample_hz: uniform tachogram sampling rate (default 4 Hz, the HRV norm).
+
+    Returns:
+        [(center_ts_unix, brpm), ...] — one estimate per window where a band peak
+        was found. Empty if there aren't enough clean beats.
+    """
+    pairs = [(float(t), float(r)) for t, r in rr_pairs
+             if r is not None and 300.0 <= float(r) <= 2000.0]
+    if len(pairs) < 30:
+        return []
+    pairs.sort(key=lambda p: p[0])
+
+    anchor_ts = pairs[0][0]
+    # Beat times: cumulative RR from the anchor (seconds), independent of the
+    # coarse per-second ts grid. y = RR in ms (the tachogram).
+    beat_t: list[float] = []
+    beat_rr: list[float] = []
+    acc = 0.0
+    for _ts, rr in pairs:
+        beat_t.append(acc)
+        beat_rr.append(rr)
+        acc += rr / 1000.0
+    total_dur = beat_t[-1]
+    if total_dur < window_s:
+        return []
+
+    bt = np.asarray(beat_t)
+    brr = np.asarray(beat_rr)
+    grid = np.arange(0.0, total_dur, 1.0 / resample_hz)
+    tach = np.interp(grid, bt, brr)
+
+    nperseg = int(window_s * resample_hz)
+    hop = int(step_s * resample_hz)
+    out: list[tuple[int, float]] = []
+    for lo in range(0, len(grid) - nperseg + 1, hop):
+        seg = tach[lo:lo + nperseg]
+        if not np.all(np.isfinite(seg)):
+            continue
+        seg = seg - np.mean(seg)
+        if np.all(seg == 0):
+            continue
+        try:
+            freqs, psd = welch(seg, fs=resample_hz, nperseg=min(nperseg, len(seg)),
+                               noverlap=min(nperseg, len(seg)) // 2)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("RSA Welch failed: %s", exc)
+            continue
+        mask = (freqs >= _RESP_BAND_LO) & (freqs <= _RESP_BAND_HI)
+        if not mask.any():
+            continue
+        peak_freq = float(freqs[mask][np.argmax(psd[mask])])
+        brpm = peak_freq * 60.0
+        center_grid = grid[lo] + window_s / 2.0
+        out.append((int(round(anchor_ts + center_grid)), round(brpm, 1)))
+    return out
+
+
+def skin_temp_series_from_raw(
+    raw_pairs: Sequence[tuple[float, float]],
+    *,
+    slope: float = SKIN_TEMP_SLOPE,
+) -> list[tuple[int, float]]:
+    """APPROXIMATE — per-sample skin-temperature DEVIATION (Δ°C) from the nightly
+    median of the raw ADC series.
+
+    Mirrors how WHOOP presents skin temperature: as a nightly deviation from a
+    personal baseline, NOT as an absolute °C value.  The nightly median is used
+    as the within-night reference so the unknown additive offset cancels entirely
+    (deviation = slope * (raw - median_raw)).  Only the slope matters for relative
+    accuracy, and the un-calibrated default slope is adequate for trend analysis.
+
+    Args:
+        raw_pairs: time-ordered (ts_seconds, raw_adc) pairs from skin_temp_samples.
+        slope:     °C per ADC count (default SKIN_TEMP_SLOPE = 0.02).
+
+    Returns:
+        [(center_ts_unix, delta_celsius), ...] — one point per input sample,
+        sorted ascending by ts.  Returns [] if raw_pairs is empty.
+
+    Notes:
+        Unit string for callers: "Δ°C" (relative to nightly median, NOT a
+        personal trailing-night baseline — that would require >1 night of data).
+    """
+    pairs = [(float(t), float(r)) for t, r in raw_pairs if r is not None]
+    if not pairs:
+        return []
+    pairs.sort(key=lambda p: p[0])
+    raws = [r for _, r in pairs]
+    median_raw = float(np.median(raws))
+    return [
+        (int(round(ts)), round(slope * (raw - median_raw), 2))
+        for ts, raw in pairs
+    ]
+
+
 def resp_rate_bpm(raw: float) -> float:
     """
     APPROXIMATE — single-sample legacy interface: convert a raw ADC/sensor count

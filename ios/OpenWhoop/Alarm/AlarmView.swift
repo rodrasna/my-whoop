@@ -43,6 +43,8 @@ struct AlarmView: View {
 
     // Transient state for the DatePicker binding
     @State private var wakeByDate: Date = AlarmView.todayAt(hour: 7, minute: 0)
+    /// Controla la alerta de pulsera desconectada.
+    @State private var showDisconnectedAlert = false
 
     var body: some View {
         NavigationStack {
@@ -58,13 +60,13 @@ struct AlarmView: View {
                 .scrollContentBackground(.hidden)
                 .background(WH.Color.background)
             }
-            .navigationTitle("Alarm")
+            .navigationTitle("Alarma")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
             .preferredColorScheme(.dark)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Done") { dismiss() }
+                    Button("Listo") { dismiss() }
                         .foregroundStyle(WH.Color.strainBlue)
                 }
             }
@@ -74,6 +76,12 @@ struct AlarmView: View {
                 wakeByHour   = comps.hour   ?? wakeByHour
                 wakeByMinute = comps.minute ?? wakeByMinute
             }
+            .alert("Pulsera no conectada", isPresented: $showDisconnectedAlert) {
+                Button("Armar de todos modos", role: .destructive) { setAlarm() }
+                Button("Cancelar", role: .cancel) {}
+            } message: {
+                Text("La alarma se programa en la pulsera y no sonará si no la conectas antes de armarla.")
+            }
         }
     }
 
@@ -82,7 +90,7 @@ struct AlarmView: View {
     private var alarmTimeSection: some View {
         Section {
             DatePicker(
-                "Wake by",
+                "Despertar antes de",
                 selection: $wakeByDate,
                 displayedComponents: .hourAndMinute
             )
@@ -91,20 +99,20 @@ struct AlarmView: View {
             .foregroundStyle(WH.Color.textPrimary)
             .listRowBackground(WH.Color.surface)
         } header: {
-            sectionHeader("Wake-by Time")
+            sectionHeader("Hora límite")
         }
     }
 
     private var smartWakeSection: some View {
         Section {
-            Toggle("Smart wake", isOn: $smartWakeEnabled)
+            Toggle("Despertar inteligente", isOn: $smartWakeEnabled)
                 .tint(WH.Color.sleepPurple)
                 .foregroundStyle(WH.Color.textPrimary)
                 .listRowBackground(WH.Color.surface)
 
             if smartWakeEnabled {
                 Stepper(
-                    "Up to \(smartWakeLeadMin) min early",
+                    "Hasta \(smartWakeLeadMin) min antes",
                     value: $smartWakeLeadMin,
                     in: 5...30,
                     step: 5
@@ -113,12 +121,12 @@ struct AlarmView: View {
                 .listRowBackground(WH.Color.surface)
             }
         } header: {
-            sectionHeader("Smart Wake")
+            sectionHeader("Despertar inteligente")
         } footer: {
-            Text("Smart wake monitors your HR and movement to find a light-sleep moment "
-                 + "within the lead window, then buzzes the strap at the optimal moment. "
-                 + "Best-effort — requires the strap to be worn and connected. "
-                 + "The fixed-time alarm above always fires as a safety net.")
+            Text("El despertar inteligente analiza tu FC y movimiento para encontrar un momento de sueño ligero "
+                 + "dentro de la ventana configurada y activa la vibración en el momento óptimo. "
+                 + "Requiere llevar la pulsera puesta y conectada. "
+                 + "La alarma a hora fija siempre se activa como red de seguridad.")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
         }
@@ -128,9 +136,9 @@ struct AlarmView: View {
         Section {
             HStack(spacing: WH.Spacing.sm) {
                 Button {
-                    setAlarm()
+                    armAlarmOrWarn()
                 } label: {
-                    Label("Set alarm", systemImage: "alarm")
+                    Label("Programar alarma", systemImage: "alarm")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, WH.Spacing.xs)
                 }
@@ -140,7 +148,7 @@ struct AlarmView: View {
                 Button(role: .destructive) {
                     disableAlarm()
                 } label: {
-                    Label("Turn off", systemImage: "alarm.slash")
+                    Label("Desactivar", systemImage: "alarm.slash")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, WH.Spacing.xs)
                 }
@@ -161,16 +169,16 @@ struct AlarmView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(WH.Color.recoveryGreen)
                             .font(.system(size: 14))
-                        Text("Alarm set for \(formattedTime(fireDate))")
+                        Text("Alarma programada para las \(formattedTime(fireDate))")
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
                             .foregroundStyle(WH.Color.textPrimary)
                     }
-                    Text("Your strap will buzz at \(formattedTime(fireDate)).")
+                    Text("La pulsera vibrará a las \(formattedTime(fireDate)).")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                     if smartWakeEnabled {
-                        Text("Smart wake: watches for a light-sleep window up to "
-                             + "\(smartWakeLeadMin) min before that time.")
+                        Text("Despertar inteligente: buscará un momento de sueño ligero hasta "
+                             + "\(smartWakeLeadMin) min antes.")
                             .font(WH.Font.caption)
                             .foregroundStyle(WH.Color.textSecondary)
                     }
@@ -179,7 +187,7 @@ struct AlarmView: View {
                         Image(systemName: "alarm.slash")
                             .foregroundStyle(WH.Color.textSecondary)
                             .font(.system(size: 14))
-                        Text("No alarm set")
+                        Text("Sin alarma programada")
                             .font(.system(size: 14, weight: .medium, design: .rounded))
                             .foregroundStyle(WH.Color.textSecondary)
                     }
@@ -188,7 +196,7 @@ struct AlarmView: View {
             .padding(.vertical, WH.Spacing.xs)
             .listRowBackground(WH.Color.surface)
         } header: {
-            sectionHeader("Status")
+            sectionHeader("Estado")
         }
     }
 
@@ -196,17 +204,17 @@ struct AlarmView: View {
         Section {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                 noteRow(icon: "wave.3.right",
-                        text: "Strap must be connected and worn at alarm time for the buzz to fire.")
+                        text: "La pulsera debe estar conectada y puesta en el momento de armar para que la alarma suene.")
                 noteRow(icon: "iphone.slash",
-                        text: "Fixed-time firmware alarm fires even if the app is force-quit or the phone is locked.")
+                        text: "La alarma de firmware a hora fija se activa aunque la app esté cerrada o el móvil bloqueado.")
                 noteRow(icon: "exclamationmark.triangle",
-                        text: "Smart-wake background BLE and actual firing require on-device testing — "
-                            + "cannot be fully verified in the simulator.")
+                        text: "El despertar inteligente por BLE en segundo plano requiere prueba en dispositivo real — "
+                            + "no puede verificarse en el simulador.")
             }
             .padding(.vertical, WH.Spacing.xs)
             .listRowBackground(WH.Color.surface)
         } header: {
-            sectionHeader("Notes")
+            sectionHeader("Notas")
         }
     }
 
@@ -233,6 +241,16 @@ struct AlarmView: View {
     }
 
     // MARK: - Actions
+
+    /// Comprueba si la pulsera está conectada antes de armar.
+    /// Si no lo está, muestra una alerta de advertencia; si sí, arma directamente.
+    private func armAlarmOrWarn() {
+        if live.state.connected {
+            setAlarm()
+        } else {
+            showDisconnectedAlert = true
+        }
+    }
 
     private func setAlarm() {
         let fireDate = nextOccurrence(hour: wakeByHour, minute: wakeByMinute)

@@ -413,12 +413,27 @@ struct SleepView: View {
                     accentColor: session?.avgHrv != nil ? WH.Color.recoveryGreen : WH.Color.textSecondary
                 )
 
-                MetricCard(
-                    title: "Frec. respiratoria",
-                    value: daily?.respRateBpm.map { String(format: "%.1f", $0) } ?? "—",
-                    unit: daily?.respRateBpm != nil ? "/min" : nil,
-                    accentColor: daily?.respRateBpm != nil ? WH.Color.strainBlue : WH.Color.textSecondary
-                )
+                // Respiración: tendencia por instante (RSA del IBI) → pulsable.
+                if let session {
+                    NavigationLink(destination: SleepRespChartView(session: session)) {
+                        MetricCard(
+                            title: "Frec. respiratoria",
+                            value: daily?.respRateBpm.map { String(format: "%.1f", $0) } ?? "—",
+                            unit: daily?.respRateBpm != nil ? "/min" : nil,
+                            accentColor: daily?.respRateBpm != nil ? WH.Color.strainBlue : WH.Color.textSecondary
+                        ) {
+                            chartHint
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    MetricCard(
+                        title: "Frec. respiratoria",
+                        value: "—",
+                        unit: nil,
+                        accentColor: WH.Color.textSecondary
+                    )
+                }
 
                 MetricCard(
                     title: "SpO₂",
@@ -427,15 +442,30 @@ struct SleepView: View {
                     accentColor: daily?.spo2Pct != nil ? WH.Color.textPrimary : WH.Color.textSecondary
                 )
 
-                MetricCard(
-                    title: "Desv. temp. piel",
-                    value: {
-                        guard let t = daily?.skinTempDevC else { return "—" }
-                        return String(format: "%+.1f", t)
-                    }(),
-                    unit: daily?.skinTempDevC != nil ? "°C" : nil,
-                    accentColor: daily?.skinTempDevC != nil ? WH.Color.recoveryYellow : WH.Color.textSecondary
-                )
+                // Temperatura de piel: desviación respecto a mediana de la noche → pulsable.
+                if let session {
+                    NavigationLink(destination: SleepTempChartView(session: session)) {
+                        MetricCard(
+                            title: "Desv. temp. piel",
+                            value: {
+                                guard let t = daily?.skinTempDevC else { return "—" }
+                                return String(format: "%+.1f", t)
+                            }(),
+                            unit: daily?.skinTempDevC != nil ? "Δ°C" : nil,
+                            accentColor: daily?.skinTempDevC != nil ? WH.Color.recoveryYellow : WH.Color.textSecondary
+                        ) {
+                            chartHint
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    MetricCard(
+                        title: "Desv. temp. piel",
+                        value: "—",
+                        unit: nil,
+                        accentColor: WH.Color.textSecondary
+                    )
+                }
             }
         }
     }

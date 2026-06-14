@@ -206,6 +206,28 @@ def get_stream(kind: str, device: str,
         raise HTTPException(status_code=404, detail=f"unknown stream kind: {kind}")
 
 
+@app.get("/v1/resp-series", dependencies=[Depends(require_auth)])
+def get_resp_series(device: str,
+                    from_: int = Query(0, alias="from"),
+                    to: int = Query(2_000_000_000, alias="to")):
+    """RSA-derived respiratory-rate trend (BrPM over time) from the RR series in
+    [from, to] (unix seconds). Returns [{ts, value, unit}]; empty when too few beats."""
+    with psycopg.connect(cfg.db_dsn) as conn:
+        return read.query_resp_series(conn, device_id=device, start=from_, end=to)
+
+
+@app.get("/v1/temp-series", dependencies=[Depends(require_auth)])
+def get_temp_series(device: str,
+                    from_: int = Query(0, alias="from"),
+                    to: int = Query(2_000_000_000, alias="to")):
+    """Skin-temperature deviation trend (Δ°C from nightly median) from the
+    skin_temp_samples table in [from, to] (unix seconds).
+    Returns [{ts, value, unit}] where unit="Δ°C"; empty when no rows in window.
+    Values are relative to the within-night median raw ADC — NOT absolute °C."""
+    with psycopg.connect(cfg.db_dsn) as conn:
+        return read.query_temp_series(conn, device_id=device, start=from_, end=to)
+
+
 # ── Daily analysis endpoints (Task 2.5) ──────────────────────────────────────
 
 class ComputeDaily(BaseModel):

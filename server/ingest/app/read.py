@@ -7,7 +7,9 @@ import zstandard
 
 from .analysis.units import (
     resp_rate_bpm,
+    resp_rate_series_from_rr,
     skin_temp_celsius,
+    skin_temp_series_from_raw,
     spo2_percent,
     spo2_percent_window,
 )
@@ -185,6 +187,47 @@ def _augment_units(kind, rows):
             r["value"] = round(resp_rate_bpm(r["raw"]), 1)
             r["unit"] = "bpm"
     return rows
+
+
+def query_resp_series(conn, device_id, start, end):
+    """RSA-derived respiratory-rate trend (BrPM over time) from the RR-interval
+    series in [start, end] (unix seconds). Returns [{ts, value, unit}] with ts as
+    unix seconds; empty when there aren't enough clean beats. The estimate is a
+    pure signal-processing trend (no per-user calibration)."""
+    rows = conn.execute(
+        "SELECT extract(epoch FROM ts), rr_ms FROM rr_intervals "
+        "WHERE device_id = %s AND ts >= to_timestamp(%s) AND ts <= to_timestamp(%s) "
+        "ORDER BY ts",
+        (device_id, start, end),
+    ).fetchall()
+    pairs = [(float(r[0]), float(r[1])) for r in rows if r[1] is not None]
+    series = resp_rate_series_from_rr(pairs)
+    return [{"ts": ts, "value": brpm, "unit": "bpm"} for ts, brpm in series]
+
+
+def query_temp_series(conn, device_id, start, end):
+    """Nightly skin-temperature DEVIATION (Δ°C relative to the within-night median
+    raw ADC) from the skin_temp_samples table in [start, end] (unix seconds).
+
+    Returns [{ts, value, unit}] with ts as unix seconds, sorted ascending.
+    The unit is "Δ°C" to make explicit that this is a relative measurement, not
+    an absolute temperature.  Returns [] when there are no rows in the window.
+
+    DESIGN NOTE: we cannot return calibrated absolute °C because the thermistor
+    chain (R₀, β, divider topology) is unknown.  Deviation from the nightly median
+    cancels the additive offset entirely; only the un-calibrated slope (0.02 °C/ADC)
+    affects accuracy, which is adequate for trend analysis.  This mirrors how WHOOP
+    presents skin temperature in its official app.
+    """
+    rows = conn.execute(
+        "SELECT extract(epoch FROM ts), raw FROM skin_temp_samples "
+        "WHERE device_id = %s AND ts >= to_timestamp(%s) AND ts <= to_timestamp(%s) "
+        "ORDER BY ts",
+        (device_id, start, end),
+    ).fetchall()
+    pairs = [(float(r[0]), float(r[1])) for r in rows if r[1] is not None]
+    series = skin_temp_series_from_raw(pairs)
+    return [{"ts": ts, "value": delta, "unit": "Δ°C"} for ts, delta in series]
 
 
 def counts(conn, device_id, start, end):

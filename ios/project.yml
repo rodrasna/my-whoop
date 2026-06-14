@@ -1,6 +1,6 @@
 name: OpenWhoop
 options:
-  bundleIdPrefix: com.openwhoop
+  bundleIdPrefix: com.rodrigocalvo
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true
@@ -37,6 +37,7 @@ targets:
       - package: WhoopStore
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rodrigocalvo.mywhoop
         TARGETED_DEVICE_FAMILY: 1
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"

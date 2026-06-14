@@ -533,6 +533,57 @@ final class ServerSync {
         }
     }
 
+    // MARK: - Respiratory-rate trend (RSA from RR intervals)
+
+    /// GET /v1/resp-series?device=<deviceId>&from=<from>&to=<to>
+    /// Returns an array of (ts: epoch Int, bpm: Double) — the RSA-derived breathing
+    /// rate trend over the window. Empty on any network/parse error or too-few beats.
+    func getRespSeries(fromEpoch: Int, toEpoch: Int) async -> [(ts: Int, bpm: Double)] {
+        let path = "/v1/resp-series?device=\(deviceId)&from=\(fromEpoch)&to=\(toEpoch)"
+        guard let body = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: body)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { r -> (ts: Int, bpm: Double)? in
+            let ts: Int?
+            if let tsStr = r["ts"] as? String {
+                ts = ServerSync.parseEpoch(tsStr)
+            } else if let n = r["ts"] as? NSNumber {
+                ts = n.intValue
+            } else {
+                ts = nil
+            }
+            guard let t = ts, let v = (r["value"] as? NSNumber)?.doubleValue else { return nil }
+            return (ts: t, bpm: v)
+        }
+    }
+
+    // MARK: - Skin-temperature deviation trend
+
+    /// GET /v1/temp-series?device=<deviceId>&from=<from>&to=<to>
+    /// Returns an array of (ts: epoch Int, delta: Double) — the within-night skin-temperature
+    /// deviation (Δ°C from the nightly median raw ADC) over the window.
+    /// Empty on any network/parse error or when there is no data in the window.
+    func getTempSeries(fromEpoch: Int, toEpoch: Int) async -> [(ts: Int, delta: Double)] {
+        let path = "/v1/temp-series?device=\(deviceId)&from=\(fromEpoch)&to=\(toEpoch)"
+        guard let body = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: body)) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { r -> (ts: Int, delta: Double)? in
+            let ts: Int?
+            if let tsStr = r["ts"] as? String {
+                ts = ServerSync.parseEpoch(tsStr)
+            } else if let n = r["ts"] as? NSNumber {
+                ts = n.intValue
+            } else {
+                ts = nil
+            }
+            guard let t = ts, let v = (r["value"] as? NSNumber)?.doubleValue else { return nil }
+            return (ts: t, delta: v)
+        }
+    }
+
     // MARK: - Workout calorie backfill
 
     /// POST /v1/backfill-workouts {device, from, to} (YYYY-MM-DD UTC).

@@ -22,6 +22,7 @@ final class MetricsRepository: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastError: String?
     @Published private(set) var lastRefreshedAt: Date?
+    @Published private(set) var isDemoPreviewActive = false
 
     // Injected directly (test path): store + sync are ready immediately; skip ensureOpen.
     private var store: WhoopStore?
@@ -42,6 +43,7 @@ final class MetricsRepository: ObservableObject {
         self.store = nil
         self.serverSync = nil
         self._alreadyOpen = false
+        self.isDemoPreviewActive = UserDefaults.standard.bool(forKey: DemoDataLoader.activeKey)
     }
 
     // MARK: - Designated init (test path — store + sync injected)
@@ -97,6 +99,12 @@ final class MetricsRepository: ObservableObject {
         return MetricsRepository(store: store, serverSync: sync, deviceId: deviceId)
     }
 
+    /// True when a server is configured (WHOOP_BASE_URL + API key set in Secrets.xcconfig).
+    /// Lets the empty states distinguish "no server configured" from "configured, no data yet".
+    var isServerConfigured: Bool {
+        serverSync != nil || AppConfig.uploaderConfig(deviceId: deviceId) != nil
+    }
+
     // MARK: - Load from cache (no network)
 
     /// Populate `today`/`lastNight` from the local cache. No network call.
@@ -136,7 +144,9 @@ final class MetricsRepository: ObservableObject {
         await ensureOpen()
         isRefreshing = true
         lastError = nil
-        await serverSync?.pullDerived()
+        if !isDemoPreviewActive {
+            await serverSync?.pullDerived()
+        }
         await load()
         isRefreshing = false
         lastRefreshedAt = Date()
@@ -251,6 +261,38 @@ final class MetricsRepository: ObservableObject {
         }
     }
 
+    /// Fetch the RSA-derived respiratory-rate trend (breaths/min over time) for an
+    /// epoch-second window, mapped to TrendPoints for the chart. Returns [] on error
+    /// or when there aren't enough beats. The series is a signal-processing estimate.
+    func respSeries(fromEpoch: Int, toEpoch: Int) async -> [TrendPoint] {
+        await ensureOpen()
+        guard let serverSync else { return [] }
+        let raw = await serverSync.getRespSeries(fromEpoch: fromEpoch, toEpoch: toEpoch)
+        return raw.map { pair in
+            TrendPoint(
+                id: "\(pair.ts)",
+                date: Date(timeIntervalSince1970: TimeInterval(pair.ts)),
+                value: pair.bpm
+            )
+        }
+    }
+
+    /// Fetch the nightly skin-temperature deviation trend (Δ°C from within-night median)
+    /// for an epoch-second window, mapped to TrendPoints for the chart.
+    /// Returns [] on error or when there is no data. Values are relative (not absolute °C).
+    func tempSeries(fromEpoch: Int, toEpoch: Int) async -> [TrendPoint] {
+        await ensureOpen()
+        guard let serverSync else { return [] }
+        let raw = await serverSync.getTempSeries(fromEpoch: fromEpoch, toEpoch: toEpoch)
+        return raw.map { pair in
+            TrendPoint(
+                id: "\(pair.ts)",
+                date: Date(timeIntervalSince1970: TimeInterval(pair.ts)),
+                value: pair.delta
+            )
+        }
+    }
+
     // MARK: - Workouts (M5)
 
     /// Fetches auto-detected workout bouts from the server for the given date range.
@@ -270,5 +312,74 @@ final class MetricsRepository: ObservableObject {
     func backfillWorkouts(from: String, to: String) async -> Bool {
         await ensureOpen()
         return await serverSync?.backfillWorkouts(from: from, to: to) ?? false
+    }
+
+    // MARK: - Baselines & calibration helpers
+
+    /// Media de los últimos 30 días (excluye hoy UTC) para baselines estilo WHOOP.
+    func thirtyDayBaselines() async -> BaselineCalculator.Averages {
+        await ensureOpen()
+        guard let store else { return BaselineCalculator.Averages() }
+        let cal = Calendar(identifier: .gregorian)
+        let fmt = DateFormatter()
+        fmt.calendar = cal
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd"
+        let today = Date()
+        let todayDay = fmt.string(from: today)
+        guard let fromDate = cal.date(byAdding: .day, value: -30, to: today) else {
+            return BaselineCalculator.Averages()
+        }
+        let fromDay = fmt.string(from: fromDate)
+        let rows = (try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: todayDay)) ?? []
+        return BaselineCalculator.thirtyDay(from: rows, excludingDay: todayDay)
+    }
+
+    /// Noches con sesión de sueño en los últimos `days` días.
+    func sleepNightCount(days: Int = 30) async -> Int {
+        await ensureOpen()
+        guard let store else { return 0 }
+        let now = Int(Date().timeIntervalSince1970)
+        let from = now - days * 86_400
+        let sessions = (try? await store.sleepSessions(deviceId: deviceId, from: from, to: now, limit: 200)) ?? []
+        return sessions.count
+    }
+
+    // MARK: - Demo preview (métricas de referencia WHOOP oficial → caché local)
+
+    /// Escribe métricas de vista previa en GRDB (no usa BLE ni servidor). Para comparar UI con WHOOP oficial.
+    func loadDemoPreview() async {
+        await ensureOpen()
+        guard let store else {
+            lastError = "No se pudo abrir la base de datos"
+            return
+        }
+        let payload = DemoDataLoader.make(deviceId: deviceId)
+        do {
+            try await store.upsertDailyMetrics(payload.daily, deviceId: deviceId)
+            try await store.upsertSleepSessions(payload.sessions, deviceId: deviceId)
+            UserDefaults.standard.set(true, forKey: DemoDataLoader.activeKey)
+            isDemoPreviewActive = true
+            lastError = nil
+            await load()
+            lastRefreshedAt = Date()
+        } catch {
+            lastError = "Error al cargar vista previa"
+        }
+    }
+
+    func clearDemoPreviewFlag() {
+        UserDefaults.standard.set(false, forKey: DemoDataLoader.activeKey)
+        isDemoPreviewActive = false
+    }
+
+    /// Quita la vista previa y borra métricas cacheadas localmente, luego intenta pull del servidor.
+    func clearDemoPreview() async {
+        await ensureOpen()
+        clearDemoPreviewFlag()
+        if let store {
+            try? await store.clearCachedMetrics(deviceId: deviceId)
+        }
+        await refresh()
     }
 }
