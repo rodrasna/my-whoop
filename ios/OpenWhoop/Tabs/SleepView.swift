@@ -54,17 +54,23 @@ struct SleepView: View {
         }
         .preferredColorScheme(.dark)
         .task {
-            await loadData()
+            await metrics.refresh()
+            await reloadLocal()
         }
         .refreshable {
-            await loadData()
+            await metrics.refresh()
+            await reloadLocal()
+        }
+        .onChange(of: metrics.lastRefreshedAt) { _ in
+            Task { await reloadLocal() }
         }
     }
 
     // MARK: - Data loading
 
-    private func loadData() async {
-        await metrics.refresh()
+    /// Reads the locally-cached derived data only. Must NOT call metrics.refresh(),
+    /// or the lastRefreshedAt change it emits re-triggers onChange in an infinite loop.
+    private func reloadLocal() async {
         detail = await metrics.sleepDetail()
         weekNights = await metrics.sevenNightSleepWake(nights: 7)
     }
@@ -75,7 +81,7 @@ struct SleepView: View {
         VStack(spacing: WH.Spacing.md) {
             ProgressView()
                 .tint(WH.Color.textSecondary)
-            Text("Loading sleep data…")
+            Text("Cargando sueño…")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
         }
@@ -89,7 +95,7 @@ struct SleepView: View {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
                 // Custom tight header (replaces the hidden system large-title nav bar)
-                ScreenHeader("Sleep")
+                ScreenHeader("Sueño")
 
                 // 1. Headline — efficiency hero + total duration
                 headlineSection
@@ -98,7 +104,7 @@ struct SleepView: View {
                 if let session = detail?.session {
                     HypnogramView(session: session)
                 } else {
-                    noDataCard(icon: "moon.zzz", message: "No stage data for last night")
+                    noDataCard(icon: "moon.zzz", message: "Sin etapas de sueño de anoche")
                 }
 
                 // 3. Stage breakdown + sleep stats
@@ -116,6 +122,17 @@ struct SleepView: View {
                 // Error banner (non-blocking)
                 if let err = metrics.lastError {
                     errorBanner(err)
+                }
+
+                if metrics.isDemoPreviewActive {
+                    HStack(spacing: WH.Spacing.xs) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11))
+                            .foregroundStyle(WH.Color.sleepBlue)
+                        Text("Vista previa — datos de referencia")
+                            .font(WH.Font.caption)
+                            .foregroundStyle(WH.Color.textSecondary)
+                    }
                 }
 
                 // Empty state
@@ -136,13 +153,12 @@ struct SleepView: View {
     // MARK: - 1. Headline section
 
     private var headlineSection: some View {
-        // TODO: server-side sleep performance/need/debt — use efficiency as the headline for now
         let session = detail?.session
         let daily = detail?.daily
 
-        let efficiencyPct: Int? = {
-            if let e = session?.efficiency, e > 0 { return Int((e * 100).rounded()) }
-            if let e = daily?.efficiency, e > 0 { return Int((e * 100).rounded()) }
+        let efficiencyPct: Double? = {
+            if let e = session?.efficiency, e > 0 { return e * 100 }
+            if let e = daily?.efficiency, e > 0 { return e * 100 }
             return nil
         }()
 
@@ -155,17 +171,22 @@ struct SleepView: View {
             return nil
         }()
 
-        return VStack(spacing: WH.Spacing.sm) {
+        return VStack(spacing: WH.Spacing.md) {
+            if let score = efficiencyPct {
+                SleepPerformanceRing(scorePercent: score)
+                    .frame(maxWidth: .infinity)
+            }
+
             HStack(alignment: .bottom, spacing: WH.Spacing.md) {
                 // Big efficiency percentage
                 VStack(alignment: .leading, spacing: WH.Spacing.xs) {
-                    Text("SLEEP EFFICIENCY")
+                    Text("EFICIENCIA DEL SUEÑO")
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
 
                     HStack(alignment: .lastTextBaseline, spacing: WH.Spacing.xs) {
-                        Text(efficiencyPct.map { "\($0)" } ?? "—")
+                        Text(efficiencyPct.map { "\(Int($0.rounded()))" } ?? "—")
                             .font(WH.Font.metricHero(size: 64))
                             .foregroundStyle(efficiencyPct != nil ? WH.Color.textPrimary : WH.Color.textSecondary)
                             .monospacedDigit()
@@ -181,7 +202,7 @@ struct SleepView: View {
 
                 // Total time asleep (right-aligned)
                 VStack(alignment: .trailing, spacing: WH.Spacing.xs) {
-                    Text("TIME ASLEEP")
+                    Text("TIEMPO DORMIDO")
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
@@ -229,57 +250,105 @@ struct SleepView: View {
             formatMinutes(Double($0.endTs - $0.startTs) / 60)
         }
 
-        return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("Stage Breakdown")
-
-            // Deep / REM / Light row
-            HStack(spacing: WH.Spacing.sm) {
-                stageMinCard(
-                    label: "DEEP",
-                    color: WH.Color.stageDeep,
-                    minutes: daily?.deepMin
-                )
-                stageMinCard(
-                    label: "REM",
-                    color: WH.Color.stageRem,
-                    minutes: daily?.remMin
-                )
-                stageMinCard(
-                    label: "LIGHT",
-                    color: WH.Color.stageLight,
-                    minutes: daily?.lightMin
-                )
+        // Per-stage minutes: prefer the hypnogram stages (the same source the chart above
+        // renders, so the bars and the % always agree); fall back to the server's daily
+        // aggregates only when the session has no stage breakdown.
+        let stageMinutes: (deep: Double?, rem: Double?, light: Double?, awake: Double?) = {
+            if let session, let stages = parseStages(session.stagesJSON), !stages.isEmpty {
+                var d = 0.0, r = 0.0, l = 0.0, w = 0.0
+                for seg in stages {
+                    let m = max(0, (seg.end - seg.start) / 60)
+                    switch seg.stage {
+                    case "deep":  d += m
+                    case "rem":   r += m
+                    case "light": l += m
+                    default:      w += m
+                    }
+                }
+                return (d, r, l, w)
             }
+            return (daily?.deepMin, daily?.remMin, daily?.lightMin, nil)
+        }()
+
+        let deep  = stageMinutes.deep
+        let rem   = stageMinutes.rem
+        let light = stageMinutes.light
+        let timeInBedMin: Double? = session.map { Double($0.endTs - $0.startTs) / 60 }
+        let asleepMin = (deep ?? 0) + (rem ?? 0) + (light ?? 0)
+        let awakeMin: Double? = {
+            if let w = stageMinutes.awake { return w }
+            guard let tib = timeInBedMin, tib > 0 else { return nil }
+            return max(0, tib - asleepMin)
+        }()
+        // % denominator: total across all stages (incl. awake) when derived from the
+        // hypnogram; else time in bed; else the asleep sum.
+        let totalForPct: Double = {
+            let stagesTotal = asleepMin + (awakeMin ?? 0)
+            if stagesTotal > 0 { return stagesTotal }
+            return (timeInBedMin ?? 0) > 0 ? timeInBedMin! : max(asleepMin, 1)
+        }()
+
+        return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+            sectionHeader("Etapas del sueño")
+
+            VStack(spacing: WH.Spacing.md) {
+                stageRow(label: "Despierto",       color: WH.Color.stageWake,  minutes: awakeMin, totalMin: totalForPct)
+                stageRow(label: "Ligero",          color: WH.Color.stageLight, minutes: light,    totalMin: totalForPct)
+                stageRow(label: "Sueño profundo (SWS)",  color: WH.Color.stageDeep,  minutes: deep,     totalMin: totalForPct)
+                stageRow(label: "REM",             color: WH.Color.stageRem,   minutes: rem,      totalMin: totalForPct)
+            }
+            .padding(WH.Spacing.md)
+            .background(WH.Color.surface,
+                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
 
             // Stats row
             HStack(spacing: WH.Spacing.sm) {
-                smallStatTile(label: "TIME IN BED", value: timeInBed ?? "—")
-                smallStatTile(label: "DISTURBANCES", value: daily?.disturbances.map { "\($0)" } ?? "—")
-                smallStatTile(label: "LATENCY", value: latencyMin)
+                smallStatTile(label: "TIEMPO EN CAMA", value: timeInBed ?? "—")
+                smallStatTile(label: "PERTURBACIONES", value: daily?.disturbances.map { "\($0)" } ?? "—")
+                smallStatTile(label: "LATENCIA", value: latencyMin)
             }
         }
     }
 
-    private func stageMinCard(label: String, color: Color, minutes: Double?) -> some View {
-        VStack(alignment: .leading, spacing: WH.Spacing.xs) {
-            HStack(spacing: WH.Spacing.xs) {
+    /// One sleep-stage row, official-style: ringed dot + name + colored % pill + duration,
+    /// with a proportional progress bar underneath.
+    private func stageRow(label: String, color: Color, minutes: Double?, totalMin: Double) -> some View {
+        let frac: Double = (minutes != nil && totalMin > 0) ? min(1, minutes! / totalMin) : 0
+        let pct: Int? = (minutes != nil && totalMin > 0) ? Int((frac * 100).rounded()) : nil
+        return VStack(spacing: WH.Spacing.xs) {
+            HStack(spacing: WH.Spacing.sm) {
                 Circle()
-                    .fill(color)
-                    .frame(width: 8, height: 8)
-                Text(label)
-                    .font(WH.Font.cardTitle)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .tracking(1.0)
+                    .stroke(color, lineWidth: 2)
+                    .frame(width: 13, height: 13)
+                Text(label.uppercased())
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(WH.Color.textPrimary)
+                    .tracking(0.5)
+                if let pct {
+                    Text("\(pct)%")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(color)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(color.opacity(0.18), in: Capsule())
+                }
+                Spacer()
+                Text(minutes.map { formatMinutes($0) } ?? "—")
+                    .font(.system(size: 15, weight: .semibold, design: .default))
+                    .fontWidth(.condensed)
+                    .foregroundStyle(minutes != nil ? WH.Color.textPrimary : WH.Color.textSecondary)
+                    .monospacedDigit()
             }
-            Text(minutes.map { formatMinutes($0) } ?? "—")
-                .font(WH.Font.metricMedium(size: 22))
-                .foregroundStyle(minutes != nil ? color : WH.Color.textSecondary)
-                .monospacedDigit()
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    StripedBarBackground()
+                        .clipShape(Capsule())
+                        .frame(height: 8)
+                    Capsule().fill(color).frame(width: max(0, geo.size.width * CGFloat(frac)), height: 8)
+                }
+            }
+            .frame(height: 8)
         }
-        .padding(WH.Spacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(WH.Color.surface,
-                    in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
     }
 
     private func smallStatTile(label: String, value: String) -> some View {
@@ -310,41 +379,56 @@ struct SleepView: View {
         let daily = detail?.daily
 
         return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("In-Sleep Signals")
+            sectionHeader("Señales durante el sueño")
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
                       spacing: WH.Spacing.sm) {
 
-                MetricCard(
-                    title: "Resting HR",
-                    value: session?.restingHr.map { "\($0)" } ?? "—",
-                    unit: session?.restingHr != nil ? "bpm" : nil,
-                    accentColor: session?.restingHr != nil ? WH.Color.textPrimary : WH.Color.textSecondary
-                )
+                // FC: única señal con serie temporal real → pulsable para ver la evolución.
+                if let session {
+                    NavigationLink(destination: SleepHRChartView(session: session)) {
+                        MetricCard(
+                            title: "FC en reposo",
+                            value: session.restingHr.map { "\($0)" } ?? "—",
+                            unit: session.restingHr != nil ? "lpm" : nil,
+                            accentColor: session.restingHr != nil ? WH.Color.textPrimary : WH.Color.textSecondary
+                        ) {
+                            chartHint
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    MetricCard(
+                        title: "FC en reposo",
+                        value: "—",
+                        unit: nil,
+                        accentColor: WH.Color.textSecondary
+                    )
+                }
 
                 MetricCard(
-                    title: "HRV",
+                    title: "VFC",
                     value: session?.avgHrv.map { String(format: "%.0f", $0) } ?? "—",
                     unit: session?.avgHrv != nil ? "ms" : nil,
                     accentColor: session?.avgHrv != nil ? WH.Color.recoveryGreen : WH.Color.textSecondary
                 )
 
                 MetricCard(
-                    title: "Resp Rate",
+                    title: "Frec. respiratoria",
                     value: daily?.respRateBpm.map { String(format: "%.1f", $0) } ?? "—",
                     unit: daily?.respRateBpm != nil ? "/min" : nil,
                     accentColor: daily?.respRateBpm != nil ? WH.Color.strainBlue : WH.Color.textSecondary
                 )
 
                 MetricCard(
-                    title: "SpO2",
+                    title: "SpO₂",
                     value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
                     unit: daily?.spo2Pct != nil ? "%" : nil,
                     accentColor: daily?.spo2Pct != nil ? WH.Color.textPrimary : WH.Color.textSecondary
                 )
 
                 MetricCard(
-                    title: "Skin Temp Dev",
+                    title: "Desv. temp. piel",
                     value: {
                         guard let t = daily?.skinTempDevC else { return "—" }
                         return String(format: "%+.1f", t)
@@ -356,19 +440,33 @@ struct SleepView: View {
         }
     }
 
+    /// Small affordance shown inside the tappable FC card so the user knows it opens a chart.
+    private var chartHint: some View {
+        HStack(spacing: WH.Spacing.xs) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 10, weight: .semibold))
+            Text("Ver evolución")
+                .font(.system(size: 11, weight: .semibold))
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(WH.Color.textSecondary)
+    }
+
     // MARK: - 5. 7-night sleep/wake chart
 
     private var sevenNightSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("7-Night Sleep / Wake")
+            sectionHeader("Sueño / vigilia · 7 noches")
 
             if weekNights.count < 1 {
-                noDataCard(icon: "chart.bar.xaxis", message: "Need more nights to show the trend")
+                noDataCard(icon: "chart.bar.xaxis", message: "Faltan noches para mostrar la tendencia")
             } else {
                 SevenNightChart(sessions: weekNights)
 
                 if weekNights.count < 2 {
-                    Text("Collect more nights for a full trend view")
+                    Text("Registra más noches para ver la tendencia completa")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                         .padding(.top, WH.Spacing.xs)
@@ -397,16 +495,16 @@ struct SleepView: View {
                     )
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("SMART ALARM")
+                    Text("ALARMA INTELIGENTE")
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
                     if alarmEnabled {
-                        Text("Wake alarm · \(alarmTimeString)")
+                        Text("Despertar · \(alarmTimeString)")
                             .font(.system(size: 15, weight: .semibold, design: .rounded))
                             .foregroundStyle(WH.Color.textPrimary)
                     } else {
-                        Text("No alarm set")
+                        Text("Sin alarma configurada")
                             .font(.system(size: 15, weight: .medium, design: .rounded))
                             .foregroundStyle(WH.Color.textSecondary)
                     }
@@ -470,17 +568,29 @@ struct SleepView: View {
         HStack {
             Spacer()
             VStack(spacing: WH.Spacing.sm) {
-                Image(systemName: "moon.zzz")
+                Image(systemName: metrics.isServerConfigured ? "moon.zzz" : "externaldrive.badge.xmark")
                     .font(.system(size: 36, weight: .light))
                     .foregroundStyle(WH.Color.textSecondary)
-                Text("No sleep recorded yet")
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-                    .foregroundStyle(WH.Color.textPrimary)
-                Text("Pull down to refresh")
-                    .font(WH.Font.caption)
-                    .foregroundStyle(WH.Color.textSecondary)
+                if metrics.isServerConfigured {
+                    Text("Sin sueño registrado")
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .foregroundStyle(WH.Color.textPrimary)
+                    Text("Por la mañana: cierra la app oficial, abre OpenWhoop → Dispositivo → conecta el strap y espera la sincronización. Luego desliza hacia abajo aquí.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("Servidor no configurado")
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .foregroundStyle(WH.Color.textPrimary)
+                    Text("Configura WHOOP_BASE_URL y WHOOP_API_KEY en Secrets.xcconfig y recompila.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
             }
             .padding(.vertical, WH.Spacing.xxl)
+            .padding(.horizontal, WH.Spacing.md)
             Spacer()
         }
     }
@@ -492,12 +602,12 @@ struct SleepView: View {
                     ProgressView()
                         .scaleEffect(0.7)
                         .tint(WH.Color.textSecondary)
-                    Text("Updating…")
+                    Text("Actualizando…")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                 }
             } else if let at = metrics.lastRefreshedAt {
-                Text("Updated \(relativeTime(from: at))")
+                Text("Actualizado \(relativeTime(from: at))")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
             }
@@ -539,14 +649,34 @@ struct SleepView: View {
     private func relativeTime(from date: Date) -> String {
         let elapsed = Int(-date.timeIntervalSinceNow)
         switch elapsed {
-        case ..<5:   return "just now"
-        case ..<60:  return "\(elapsed)s ago"
+        case ..<5:   return "ahora mismo"
+        case ..<60:  return "hace \(elapsed)s"
         case ..<3600:
             let m = elapsed / 60
-            return "\(m)m ago"
+            return "hace \(m)min"
         default:
             let h = elapsed / 3600
-            return "\(h)h ago"
+            return "hace \(h)h"
+        }
+    }
+}
+
+// MARK: - Striped bar (fondo rayado estilo WHOOP)
+
+private struct StripedBarBackground: View {
+    var body: some View {
+        GeometryReader { geo in
+            Path { path in
+                let step: CGFloat = 6
+                var x: CGFloat = -geo.size.height
+                while x < geo.size.width + geo.size.height {
+                    path.move(to: CGPoint(x: x, y: geo.size.height))
+                    path.addLine(to: CGPoint(x: x + geo.size.height, y: 0))
+                    x += step
+                }
+            }
+            .stroke(WH.Color.separator.opacity(0.45), lineWidth: 1)
+            .background(WH.Color.ringTrack)
         }
     }
 }
