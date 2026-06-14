@@ -11,6 +11,14 @@ public struct LiveView: View {
     public init() {}
     public var body: some View {
         LiveContentView(state: model.state, model: model, metrics: metrics)
+            // Auto-start HR streaming when the Device tab appears (if already connected)
+            // and stop it when the user navigates away to save BLE bandwidth and battery.
+            .onAppear {
+                if model.state.connected { model.startRealtimeHR() }
+            }
+            .onDisappear {
+                model.stopRealtimeHR()
+            }
             // Hide the system nav bar on the root; the custom ScreenHeader is inside the ScrollView.
             .toolbar(.hidden, for: .navigationBar)
             // scenePhase is still observed here: the Device tab hosts the scenePhase
@@ -60,7 +68,7 @@ private struct LiveContentView: View {
             ScrollView {
                 VStack(spacing: WH.Spacing.md) {
                     // Custom tight header (replaces the hidden system large-title nav bar)
-                    ScreenHeader("Device")
+                    ScreenHeader("Dispositivo")
                     settingsRow
                     connectionSection
                     liveSection
@@ -97,10 +105,10 @@ private struct LiveContentView: View {
                                 in: RoundedRectangle(cornerRadius: WH.Radius.small, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Body Profile & Settings")
+                    Text("Perfil corporal y ajustes")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(WH.Color.textPrimary)
-                    Text("Height, weight, age, sex — used for strain + calorie estimates")
+                    Text("Altura, peso, edad, sexo — para estimar esfuerzo y calorías")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                 }
@@ -141,20 +149,27 @@ private struct LiveContentView: View {
     private var connectionSection: some View {
         consoleCard {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-                sectionHeader("Connection")
+                sectionHeader("Conexión")
 
                 // Status chips row
                 HStack(spacing: WH.Spacing.sm) {
                     statusChip("LINK",
-                               state.connected ? "Connected" : "Disconnected",
+                               state.connected ? "Conectado" : "Desconectado",
                                state.connected ? WH.Color.recoveryGreen : WH.Color.textSecondary)
                     statusChip("BOND",
-                               state.bonded ? "Bonded" : "Unbonded",
+                               state.bonded ? "Vinculado" : "Sin vincular",
                                state.bonded ? WH.Color.recoveryGreen : WH.Color.recoveryYellow)
                     statusChip("BATT",
                                state.batteryPct.map { String(format: "%.1f%%", $0) } ?? "—",
                                state.batteryPct.map { $0 < 20 ? WH.Color.recoveryRed : WH.Color.strainBlue }
                                    ?? WH.Color.textSecondary)
+                    statusChip("mV",
+                               state.batteryMv.map { "\($0)" } ?? "—",
+                               state.batteryMv.map { mv in
+                                   mv < 3400 ? WH.Color.recoveryRed
+                                   : mv < 3600 ? WH.Color.recoveryYellow
+                                   : WH.Color.strainBlue
+                               } ?? WH.Color.textSecondary)
                 }
 
                 // Sync-freshness row
@@ -171,8 +186,8 @@ private struct LiveContentView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(WH.Color.recoveryYellow)
-                        Text("WHOOP may need a reboot — connected but not logging new data. "
-                             + "Put it on the charger briefly to reboot.")
+                        Text("WHOOP quizá necesite reiniciarse — conectado pero sin registrar datos nuevos. "
+                             + "Ponlo en el cargador un momento para reiniciar.")
                             .font(WH.Font.caption)
                             .foregroundStyle(WH.Color.recoveryYellow)
                             .fixedSize(horizontal: false, vertical: true)
@@ -190,14 +205,14 @@ private struct LiveContentView: View {
         let s = StalenessPolicy.state(lastSyncedAt: state.lastSyncedAt, now: Date().timeIntervalSince1970)
         let (label, color): (String, Color) = {
             switch s {
-            case .neverSynced: return ("Never synced", WH.Color.textSecondary)
-            case .caughtUp:    return ("Caught up", WH.Color.recoveryGreen)
-            case .catchingUp:  return ("Catching up…", WH.Color.recoveryYellow)
-            case .stale:       return ("Sync stale — keep the app open", WH.Color.recoveryRed)
+            case .neverSynced: return ("Sin sincronizar nunca", WH.Color.textSecondary)
+            case .caughtUp:    return ("Al día", WH.Color.recoveryGreen)
+            case .catchingUp:  return ("Poniéndose al día…", WH.Color.recoveryYellow)
+            case .stale:       return ("Sync desactualizado — mantén la app abierta", WH.Color.recoveryRed)
             }
         }()
         let text = state.lastSyncedAt.map { ts in
-            "\(label) · \(Int((Date().timeIntervalSince1970 - ts) / 60))m ago"
+            "\(label) · hace \(Int((Date().timeIntervalSince1970 - ts) / 60))m"
         } ?? label
         return HStack(spacing: WH.Spacing.xs) {
             Circle()
@@ -230,7 +245,7 @@ private struct LiveContentView: View {
     private var liveSection: some View {
         consoleCard {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-                sectionHeader("Live")
+                sectionHeader("En vivo")
 
                 // Big HR readout
                 HStack(alignment: .lastTextBaseline, spacing: WH.Spacing.xs) {
@@ -252,7 +267,7 @@ private struct LiveContentView: View {
 
                 // R-R intervals
                 VStack(alignment: .leading, spacing: WH.Spacing.xs) {
-                    Text("R-R INTERVALS")
+                    Text("INTERVALOS R-R")
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
@@ -278,15 +293,15 @@ private struct LiveContentView: View {
     private var controlsSection: some View {
         consoleCard {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-                sectionHeader("Controls")
+                sectionHeader("Controles")
 
                 // Connect / Disconnect
                 HStack(spacing: WH.Spacing.sm) {
-                    consoleButton("Connect", icon: "antenna.radiowaves.left.and.right",
+                    consoleButton("Conectar", icon: "antenna.radiowaves.left.and.right",
                                   accent: WH.Color.strainBlue, prominent: true) {
                         model.connect()
                     }
-                    consoleButton("Disconnect", icon: "xmark.circle",
+                    consoleButton("Desconectar", icon: "xmark.circle",
                                   accent: WH.Color.textSecondary, prominent: false) {
                         model.disconnect()
                     }
@@ -294,19 +309,23 @@ private struct LiveContentView: View {
 
                 // HR + Battery + Sync
                 HStack(spacing: WH.Spacing.sm) {
-                    consoleButton("Start HR", icon: "waveform.path.ecg",
+                    consoleButton("Iniciar FC", icon: "waveform.path.ecg",
                                   accent: WH.Color.recoveryRed, prominent: false) {
                         model.startRealtimeHR()
                     }
-                    consoleButton("Stop HR", icon: "stop.circle",
+                    consoleButton("Parar FC", icon: "stop.circle",
                                   accent: WH.Color.textSecondary, prominent: false) {
                         model.stopRealtimeHR()
                     }
-                    consoleButton("Battery", icon: "battery.100",
+                    consoleButton("Batería", icon: "battery.100",
                                   accent: WH.Color.recoveryGreen, prominent: false) {
                         model.getBattery()
                     }
-                    consoleButton("Sync", icon: "arrow.trianglehead.2.clockwise",
+                    consoleButton("mV", icon: "bolt.fill",
+                                  accent: WH.Color.recoveryYellow, prominent: false) {
+                        model.getExtendedBattery()
+                    }
+                    consoleButton("Sincronizar", icon: "arrow.trianglehead.2.clockwise",
                                   accent: WH.Color.teal, prominent: false) {
                         model.syncNow()
                     }
@@ -339,33 +358,33 @@ private struct LiveContentView: View {
     private var hapticsSection: some View {
         consoleCard {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-                sectionHeader("Haptics")
+                sectionHeader("Hápticos")
 
                 HStack(spacing: WH.Spacing.md) {
-                    Picker("Pattern", selection: $hapticPattern) {
-                        ForEach(0...7, id: \.self) { Text("Pattern \($0)").tag($0) }
+                    Picker("Patrón", selection: $hapticPattern) {
+                        ForEach(0...7, id: \.self) { Text("Patrón \($0)").tag($0) }
                     }
                     .pickerStyle(.menu)
                     .foregroundStyle(WH.Color.textPrimary)
                     .tint(WH.Color.strainBlue)
 
-                    Stepper("Loops \(hapticLoops)", value: $hapticLoops, in: 0...5)
+                    Stepper("Repeticiones \(hapticLoops)", value: $hapticLoops, in: 0...5)
                         .fixedSize()
                         .foregroundStyle(WH.Color.textPrimary)
                 }
 
                 HStack(spacing: WH.Spacing.sm) {
-                    consoleButton("Buzz", icon: "waveform",
+                    consoleButton("Vibrar", icon: "waveform",
                                   accent: WH.Color.sleepPurple, prominent: true) {
                         model.runHaptic(pattern: UInt8(hapticPattern), loops: UInt8(hapticLoops))
                     }
-                    consoleButton("Stop", icon: "pause.circle",
+                    consoleButton("Parar", icon: "pause.circle",
                                   accent: WH.Color.textSecondary, prominent: false) {
                         model.stopHaptics()
                     }
                     // M6: Test alarm buzz — fires patternId=2 (3 loops) + RUN_ALARM.
                     // Haptic firing cannot be verified in the simulator; test on-device only.
-                    consoleButton("Test Alarm", icon: "alarm",
+                    consoleButton("Probar alarma", icon: "alarm",
                                   accent: WH.Color.recoveryYellow, prominent: false) {
                         model.testAlarmBuzz()
                     }
@@ -379,12 +398,12 @@ private struct LiveContentView: View {
     private var batteryAlertsSection: some View {
         consoleCard {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-                sectionHeader("Battery Alerts")
+                sectionHeader("Alertas de batería")
 
-                alertRow(label: "Warn at", isOn: $warnEnabled, threshold: $warnThreshold)
-                alertRow(label: "Low at",  isOn: $lowEnabled,  threshold: $lowThreshold)
+                alertRow(label: "Avisar al", isOn: $warnEnabled, threshold: $warnThreshold)
+                alertRow(label: "Crítico al",  isOn: $lowEnabled,  threshold: $lowThreshold)
 
-                Text("Fires once when WHOOP drops to a threshold; re-arms after charging.")
+                Text("Se dispara una vez cuando WHOOP baja del umbral; se rearma tras cargar.")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -414,14 +433,14 @@ private struct LiveContentView: View {
     private var researchSection: some View {
         consoleCard {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-                sectionHeader("Research")
+                sectionHeader("Investigación")
 
-                Toggle("Capture raw frames", isOn: $enableRawCapture)
+                Toggle("Capturar frames crudos", isOn: $enableRawCapture)
                     .tint(WH.Color.strainBlue)
                     .foregroundStyle(WH.Color.textPrimary)
 
-                Text("Off = decoded-only (default). On captures raw frames locally for RE; "
-                     + "takes effect on next launch.")
+                Text("Apagado = solo decodificado (por defecto). Encendido captura frames crudos en local para ingeniería inversa; "
+                     + "surte efecto al reiniciar la app.")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -432,17 +451,26 @@ private struct LiveContentView: View {
                 // button only appears when the research toggle is on, to avoid implying you must start
                 // activities manually.
                 if enableRawCapture {
-                    consoleButton("Capture raw accel (30s · research)",
+                    consoleButton("Capturar acelerómetro crudo (30s · investigación)",
                                   icon: "sensor.tag.radiowaves.forward",
                                   accent: WH.Color.teal, prominent: false) {
                         model.captureActivitySample(seconds: 30)
                     }
-                    Text("Streams raw accelerometer for 30 s for future step/cadence work, "
-                         + "then stops + uploads. Workouts auto-detected from the 1 Hz store.")
+                    Text("Transmite el acelerómetro crudo 30 s para futuro trabajo de pasos/cadencia, "
+                         + "luego para y sube. Los entrenamientos se autodetectan desde el almacén a 1 Hz.")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                consoleButton("Vista previa WHOOP", icon: "sparkles",
+                              accent: WH.Color.sleepBlue, prominent: false) {
+                    Task { await metrics.loadDemoPreview() }
+                }
+                Text("Carga métricas de referencia (sueño 82%, recovery 20%, strain 2,8…) en Hoy/Sueño sin sync del strap.")
+                    .font(WH.Font.caption)
+                    .foregroundStyle(WH.Color.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -451,7 +479,7 @@ private struct LiveContentView: View {
 
     private var logSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.xs) {
-            sectionHeader("Log")
+            sectionHeader("Registro")
                 .padding(.horizontal, WH.Spacing.xs)
 
             VStack(alignment: .leading, spacing: 2) {
