@@ -11,6 +11,8 @@ public final class LiveState: ObservableObject {
     @Published public var heartRate: Int? = nil
     @Published public var rr: [Int] = []
     @Published public var batteryPct: Double? = nil
+    /// Fuel-gauge voltage from GET_EXTENDED_BATTERY_INFO or BATTERY_LEVEL events (millivolts).
+    @Published public var batteryMv: Int? = nil
     @Published public var lastFrameType: String? = nil
     @Published public var lastEvent: String? = nil
     /// Rolling log of human-readable lines for the on-device verification checklist.

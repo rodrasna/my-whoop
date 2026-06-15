@@ -22,8 +22,11 @@ public final class LiveViewModel: ObservableObject {
         // Request notification permission for all local notifications in one pass — sync nudge and
         // morning recovery. iOS only prompts the user once (subsequent calls are no-ops after the
         // user has decided), so calling both here keeps all auth in one place.
-        SyncNudge.requestAuthorization()
-        RecoveryNotifier.requestAuthorization()
+        // Skipped under -demoPreview so screenshot captures aren't covered by the auth dialog.
+        if !ProcessInfo.processInfo.arguments.contains("-demoPreview") {
+            SyncNudge.requestAuthorization()
+            RecoveryNotifier.requestAuthorization()
+        }
         s.$lastSyncedAt
             .compactMap { $0 }
             .sink { _ in SyncNudge.reschedule() }
@@ -35,6 +38,7 @@ public final class LiveViewModel: ObservableObject {
     public func startRealtimeHR() { ble.send(.toggleRealtimeHR, payload: [0x01]) }
     public func stopRealtimeHR()  { ble.send(.toggleRealtimeHR, payload: [0x00]) }
     public func getBattery()      { ble.send(.getBatteryLevel,  payload: [0x00]) }
+    public func getExtendedBattery() { ble.send(.getExtendedBatteryInfo, payload: [0x00]) }
 
     /// Fire a preset haptic pattern on the strap (makes it buzz). `pattern` indexes the device's
     /// preset patterns; `loops` is the repeat count. Confirmed write so the strap acks it.

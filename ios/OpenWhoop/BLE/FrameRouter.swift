@@ -38,8 +38,18 @@ public final class FrameRouter {
             if let pct = parsed.parsed["battery_pct"]?.doubleValue {
                 state.setBattery(pct)
             }
+            if let mv = parsed.parsed["battery_mV"]?.intValue {
+                state.batteryMv = mv
+            }
 
         case "EVENT":
+            if let pct = parsed.parsed["battery_pct"]?.doubleValue {
+                state.setBattery(pct)
+            }
+            if let mv = parsed.parsed["battery_mV"]?.intValue
+                ?? parsed.parsed["battery_mV?"]?.intValue {
+                state.batteryMv = mv
+            }
             if let ev = parsed.parsed["event"]?.stringValue {
                 state.lastEvent = ev
                 // Strap-pushed event = "I may have new data" → kick a (rate-limited) sync.

@@ -780,6 +780,20 @@ extension BLEManager: CBPeripheralDelegate {
         return newest
     }
 
+    /// Oldest plausible-unix marker in a GET_DATA_RANGE response = the strap's OLDEST stored record.
+    /// Same scan as `dataRangeNewestUnix` but keeps the min — diagnostic only (used to read how far
+    /// back the strap's flash buffer reaches, e.g. to date a second-hand strap's last-active period).
+    static func dataRangeOldestUnix(from frame: [UInt8]) -> Int? {
+        guard frame.count > 7 else { return nil }
+        let body = Array(frame[7...]); var oldest: Int? = nil; var i = 0
+        while i + 4 <= body.count {
+            let w = Int(body[i]) | Int(body[i+1]) << 8 | Int(body[i+2]) << 16 | Int(body[i+3]) << 24
+            if w >= 1_700_000_000 && w <= 1_900_000_000 { oldest = min(oldest ?? Int.max, w) }
+            i += 4
+        }
+        return oldest
+    }
+
     public func peripheral(_ peripheral: CBPeripheral,
                            didUpdateValueFor characteristic: CBCharacteristic,
                            error: Error?) {
@@ -800,6 +814,14 @@ extension BLEManager: CBPeripheralDelegate {
                 if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,
                    let newest = BLEManager.dataRangeNewestUnix(from: frame) {
                     strapNewestTs = newest                        // feeds the liveness watchdog
+                    // Diagnostic: log the full stored-history window the strap reports. The OLDEST
+                    // marker dates how far back the flash buffer reaches (e.g. a second-hand strap's
+                    // last-active period). Read-only — GET_DATA_RANGE never trims.
+                    let oldest = BLEManager.dataRangeOldestUnix(from: frame)
+                    let fmt = ISO8601DateFormatter()
+                    let oldestStr = oldest.map { fmt.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? "n/a"
+                    let newestStr = fmt.string(from: Date(timeIntervalSince1970: TimeInterval(newest)))
+                    log("DATA_RANGE strap window: oldest=\(oldestStr) newest=\(newestStr)")
                 }
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
