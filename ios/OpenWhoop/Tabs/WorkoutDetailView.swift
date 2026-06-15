@@ -6,6 +6,16 @@ import SwiftUI
 
 struct WorkoutDetailView: View {
     let workout: Workout
+    @ObservedObject var labelStore: ActivityLabelStore
+
+    @State private var showPicker = false
+
+    private var effectiveType: ActivityType? { labelStore.effectiveType(for: workout) }
+    private var isManual: Bool { labelStore.manualLabel(for: workout.id) != nil }
+    /// Sugerencia automática (k-NN sobre tu histórico) solo si aún no hay clasificación.
+    private var suggestion: ActivityType? {
+        effectiveType == nil ? labelStore.suggestion(for: workout) : nil
+    }
 
     // MARK: - Body
 
@@ -15,6 +25,7 @@ struct WorkoutDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: WH.Spacing.lg) {
                     headerSection
+                    activitySection
                     statsStrip
                     zoneSection
                     contextSection
@@ -24,10 +35,53 @@ struct WorkoutDetailView: View {
             }
             .background(WH.Color.background)
         }
-        .navigationTitle("Workout")
+        .navigationTitle("Entreno")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showPicker) {
+            ActivityPickerView(workout: workout, labelStore: labelStore)
+        }
+    }
+
+    // MARK: - Activity type (etiquetado)
+
+    private var activitySection: some View {
+        Button { showPicker = true } label: {
+            HStack(spacing: WH.Spacing.md) {
+                Image(systemName: effectiveType?.symbol ?? suggestion?.symbol ?? "questionmark.circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(effectiveType != nil ? WH.Color.strainBlue
+                                     : (suggestion != nil ? WH.Color.strainBlue.opacity(0.7) : WH.Color.textSecondary))
+                    .frame(width: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(effectiveType?.displayName
+                         ?? suggestion.map { "¿\($0.displayName)?" }
+                         ?? "Sin clasificar")
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .foregroundStyle(WH.Color.textPrimary)
+                    Text(titleSubtitle)
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(WH.Color.textSecondary.opacity(0.6))
+            }
+            .padding(WH.Spacing.md)
+            .background(WH.Color.surface,
+                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var titleSubtitle: String {
+        if effectiveType != nil {
+            return isManual ? "Clasificado por ti" : "Sugerido · toca para cambiar"
+        }
+        if suggestion != nil { return "Sugerido según tus sesiones · toca para confirmar" }
+        return "Toca para asignar el tipo"
     }
 
     // MARK: - Header
@@ -70,17 +124,17 @@ struct WorkoutDetailView: View {
                      unit: workout.strain != nil ? "/ 21" : nil,
                      color: WH.Color.strainBlue)
             divider
-            statCell(label: "AVG HR",
+            statCell(label: "FC MEDIA",
                      value: String(format: "%.0f", workout.avgHr),
-                     unit: "bpm",
+                     unit: "lpm",
                      color: WH.Color.textPrimary)
             divider
-            statCell(label: "PEAK HR",
+            statCell(label: "FC PICO",
                      value: "\(workout.peakHr)",
-                     unit: "bpm",
+                     unit: "lpm",
                      color: WH.Color.recoveryRed)
             divider
-            statCell(label: "CALORIES",
+            statCell(label: "CALORÍAS",
                      value: workout.caloriesKcal.map { String(format: "%.0f", $0) } ?? "—",
                      unit: workout.caloriesKcal != nil ? "kcal" : nil,
                      color: workout.caloriesKcal != nil ? WH.Color.recoveryYellow : WH.Color.textSecondary)
@@ -104,7 +158,8 @@ struct WorkoutDetailView: View {
                 .tracking(1.0)
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .font(.system(size: 18, weight: .semibold, design: .default))
+                    .fontWidth(.condensed)
                     .foregroundStyle(value == "—" ? WH.Color.textSecondary : color)
                     .monospacedDigit()
                 if let u = unit, value != "—" {
@@ -121,7 +176,7 @@ struct WorkoutDetailView: View {
 
     private var zoneSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("HR Zones")
+            sectionHeader("Zonas de FC")
 
             VStack(spacing: WH.Spacing.xs) {
                 ForEach(0..<6, id: \.self) { zone in
@@ -156,12 +211,14 @@ struct WorkoutDetailView: View {
                 Spacer()
                 // Minutes + percentage
                 Text(formatZoneMins(mins))
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .font(.system(size: 12, weight: .medium, design: .default))
+                    .fontWidth(.condensed)
                     .foregroundStyle(WH.Color.textSecondary)
                     .monospacedDigit()
                     .frame(width: 44, alignment: .trailing)
                 Text(String(format: "%.0f%%", pct))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12, weight: .semibold, design: .default))
+                    .fontWidth(.condensed)
                     .foregroundStyle(pct > 0 ? color : WH.Color.textSecondary)
                     .monospacedDigit()
                     .frame(width: 36, alignment: .trailing)
@@ -185,11 +242,11 @@ struct WorkoutDetailView: View {
 
     private var contextSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("Context")
+            sectionHeader("Contexto")
             HStack(spacing: WH.Spacing.sm) {
                 if let hrmax = workout.hrmax {
                     contextCell(
-                        label: "HR MAX",
+                        label: "FC MÁX",
                         value: String(format: "%.0f", hrmax),
                         unit: "bpm",
                         note: workout.hrmaxSource.isEmpty ? nil : "(\(workout.hrmaxSource))"
@@ -215,7 +272,8 @@ struct WorkoutDetailView: View {
                 .tracking(1.0)
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .font(.system(size: 20, weight: .semibold, design: .default))
+                    .fontWidth(.condensed)
                     .foregroundStyle(WH.Color.textPrimary)
                     .monospacedDigit()
                 Text(unit)
@@ -288,13 +346,13 @@ struct WorkoutDetailView: View {
 
     private func zoneLabel(_ zone: Int) -> String {
         switch zone {
-        case 0: return "Rest"
-        case 1: return "Very Light"
-        case 2: return "Light"
-        case 3: return "Moderate"
-        case 4: return "Hard"
-        case 5: return "Max"
-        default: return "Zone \(zone)"
+        case 0: return "Reposo"
+        case 1: return "Muy ligera"
+        case 2: return "Ligera"
+        case 3: return "Moderada"
+        case 4: return "Intensa"
+        case 5: return "Máxima"
+        default: return "Zona \(zone)"
         }
     }
 }
