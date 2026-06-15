@@ -145,7 +145,7 @@ struct TrendsView: View {
         VStack(spacing: WH.Spacing.md) {
             ProgressView()
                 .tint(WH.Color.textSecondary)
-            Text("Loading trends…")
+            Text("Cargando tendencias…")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
         }
@@ -159,7 +159,7 @@ struct TrendsView: View {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
                 // Custom tight header (replaces the hidden system large-title nav bar)
-                ScreenHeader("Trends")
+                ScreenHeader("Tendencias")
 
                 rangePicker
 
@@ -224,7 +224,7 @@ struct TrendsView: View {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                 // Header
                 HStack(alignment: .lastTextBaseline) {
-                    Text("HEART RATE")
+                    Text("FRECUENCIA CARDÍACA")
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
@@ -235,7 +235,7 @@ struct TrendsView: View {
                             .foregroundStyle(MetricKind.rawHR.color)
                             .monospacedDigit()
                         if !hrPoints.isEmpty {
-                            Text("bpm")
+                            Text("lpm")
                                 .font(WH.Font.caption)
                                 .foregroundStyle(WH.Color.textSecondary)
                         }
@@ -283,7 +283,7 @@ struct TrendsView: View {
 
     private var dayListSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            Text("ALL DAYS")
+            Text("TODOS LOS DÍAS")
                 .font(WH.Font.cardTitle)
                 .foregroundStyle(WH.Color.textSecondary)
                 .tracking(1.5)
@@ -317,7 +317,8 @@ struct TrendsView: View {
                         .fill(WH.Color.recoveryColor(forPercent: pct))
                         .frame(width: 8, height: 8)
                     Text("\(Int(pct.rounded()))%")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .font(.system(size: 13, weight: .semibold, design: .default))
+                        .fontWidth(.condensed)
                         .foregroundStyle(WH.Color.recoveryColor(forPercent: pct))
                         .frame(width: 38, alignment: .trailing)
                         .monospacedDigit()
@@ -330,7 +331,8 @@ struct TrendsView: View {
 
                 if let strain = row.strain {
                     Text(String(format: "%.1f", strain))
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(.system(size: 13, weight: .medium, design: .default))
+                        .fontWidth(.condensed)
                         .foregroundStyle(WH.Color.strainBlue)
                         .frame(width: 34, alignment: .trailing)
                         .monospacedDigit()
@@ -360,10 +362,10 @@ struct TrendsView: View {
                 Image(systemName: "chart.xyaxis.line")
                     .font(.system(size: 36, weight: .light))
                     .foregroundStyle(WH.Color.textSecondary)
-                Text("No history yet")
+                Text("Sin historial aún")
                     .font(.system(size: 17, weight: .semibold, design: .rounded))
                     .foregroundStyle(WH.Color.textPrimary)
-                Text("Pull down to refresh")
+                Text("Desliza hacia abajo para actualizar")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
             }
@@ -399,12 +401,12 @@ struct TrendsView: View {
                     ProgressView()
                         .scaleEffect(0.7)
                         .tint(WH.Color.textSecondary)
-                    Text("Updating…")
+                    Text("Actualizando…")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                 }
             } else if let at = metrics.lastRefreshedAt {
-                Text("Updated \(relativeTime(from: at))")
+                Text("Actualizado \(relativeTime(from: at))")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
             }
@@ -420,17 +422,18 @@ struct TrendsView: View {
         fmt.timeZone = TimeZone(identifier: "UTC")
         guard let date = fmt.date(from: day) else { return day }
         let out = DateFormatter()
-        out.dateFormat = "EEE M/d"
+        out.locale = Locale(identifier: "es_ES")
+        out.dateFormat = "EEE d/M"
         return out.string(from: date)
     }
 
     private func relativeTime(from date: Date) -> String {
         let elapsed = Int(-date.timeIntervalSinceNow)
         switch elapsed {
-        case ..<5:   return "just now"
-        case ..<60:  return "\(elapsed)s ago"
-        case ..<3600: return "\(elapsed / 60)m ago"
-        default:     return "\(elapsed / 3600)h ago"
+        case ..<5:   return "ahora mismo"
+        case ..<60:  return "hace \(elapsed)s"
+        case ..<3600: return "hace \(elapsed / 60)min"
+        default:     return "hace \(elapsed / 3600)h"
         }
     }
 }
