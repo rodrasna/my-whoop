@@ -58,7 +58,8 @@ WHOOP 4.0 only. Other generations use different BLE protocols and are not suppor
 
 - **iOS app** — open `ios/` (project generated via XcodeGen / SwiftPM). Copy
   `ios/OpenWhoop/Config/Secrets.example.xcconfig` → `Secrets.xcconfig` and fill in your own
-  server URL + API key (the real file is gitignored).
+  server URL + API key (the real file is gitignored). **Guía en español (iPhone físico,
+  sin servidor):** [`docs/setup-es.md`](docs/setup-es.md). Quick setup: `./scripts/setup-ios.sh`.
 - **Server** — see [`server/README.md`](server/README.md): `cp .env.example .env`, set
   `DATA_ROOT`, then `docker compose up -d --build`.
 - **RE scripts (`re/`)** — these depend on third-party clones that are intentionally **not**
