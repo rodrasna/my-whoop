@@ -161,4 +161,12 @@ extension WhoopStore {
                 }
         }
     }
+
+    /// Borra todas las métricas derivadas cacheadas para un dispositivo (vista previa / reset local).
+    public func clearCachedMetrics(deviceId: String) async throws {
+        try syncWrite { db in
+            try db.execute(sql: "DELETE FROM dailyMetric WHERE deviceId = ?", arguments: [deviceId])
+            try db.execute(sql: "DELETE FROM sleepSession WHERE deviceId = ?", arguments: [deviceId])
+        }
+    }
 }

@@ -317,6 +317,9 @@ final class MetricsRepository: ObservableObject {
     /// Returns [] when unconfigured (no API key), offline, or on parse error — never throws.
     func workouts(from: String, to: String) async -> [Workout] {
         await ensureOpen()
+        if isDemoPreviewActive {
+            return DemoDataLoader.demoWorkouts(deviceId: deviceId)
+        }
         return await serverSync?.getWorkouts(from: from, to: to) ?? []
     }
 
