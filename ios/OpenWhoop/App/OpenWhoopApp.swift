@@ -27,5 +27,11 @@ private struct AppRoot: View {
         RootTabView()
             .environmentObject(metrics)
             .environmentObject(live)
+            .task {
+                // Screenshot seed: only when launched with -demoPreview (e.g. simulator captures).
+                if ProcessInfo.processInfo.arguments.contains("-demoPreview") {
+                    await metrics.loadDemoPreview()
+                }
+            }
     }
 }

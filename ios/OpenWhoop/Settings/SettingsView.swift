@@ -139,6 +139,7 @@ struct SettingsView: View {
                 ageSection
                 sexSection
                 saveSection
+                demoPreviewSection
                 footerSection
             }
             .scrollContentBackground(.hidden)
@@ -294,6 +295,38 @@ struct SettingsView: View {
                 }
                 .listRowBackground(Color.clear)
             }
+        }
+    }
+
+    private var demoPreviewSection: some View {
+        Section {
+            Button {
+                Task { await metrics.loadDemoPreview() }
+            } label: {
+                Label("Cargar vista previa WHOOP", systemImage: "sparkles")
+            }
+            .disabled(metrics.isDemoPreviewActive)
+
+            if metrics.isDemoPreviewActive {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(WH.Color.recoveryGreen)
+                    Text("Vista previa activa")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
+                Button(role: .destructive) {
+                    Task { await metrics.clearDemoPreview() }
+                } label: {
+                    Label("Quitar vista previa", systemImage: "xmark.circle")
+                }
+            }
+        } header: {
+            Text("Vista previa UI")
+        } footer: {
+            Text("Carga en la app las métricas de tu captura WHOOP oficial (sueño 82%, recovery 20%, strain 2,8…) para ver Hoy/Sueño/Tendencias pobladas sin esperar al sync del strap.")
+                .font(WH.Font.caption)
+                .foregroundStyle(WH.Color.textSecondary)
         }
     }
 
