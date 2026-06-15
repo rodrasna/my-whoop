@@ -327,6 +327,9 @@ def _exercise_to_dict(e: _exercise.ExerciseSession) -> dict[str, Any]:
         # Calorie estimation (WHOOP/Keytel formula). None when no profile is set.
         "calories_kcal": e.calories_kcal,
         "calories_kj": e.calories_kj,
+        # Movement signature for activity-type classification. APPROXIMATE.
+        "motion_var": e.motion_var,
+        "hr_peaks_per_min": e.hr_peaks_per_min,
     }
 
 

@@ -215,9 +215,9 @@ def upsert_exercise_sessions(conn: psycopg.Connection, device_id: str, sessions)
                 """INSERT INTO exercise_sessions
                    (device_id, start_ts, end_ts, avg_hr, peak_hr, strain, kind,
                     duration_s, zone_time_pct, avg_hrr_pct, hrmax, hrmax_source,
-                    calories_kcal, calories_kj)
+                    calories_kcal, calories_kj, motion_var, hr_peaks_per_min)
                    VALUES (%s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s)
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (device_id, start_ts) DO UPDATE SET
                      end_ts        = EXCLUDED.end_ts,
                      avg_hr        = EXCLUDED.avg_hr,
@@ -230,10 +230,13 @@ def upsert_exercise_sessions(conn: psycopg.Connection, device_id: str, sessions)
                      hrmax         = EXCLUDED.hrmax,
                      hrmax_source  = EXCLUDED.hrmax_source,
                      calories_kcal = EXCLUDED.calories_kcal,
-                     calories_kj   = EXCLUDED.calories_kj""",
+                     calories_kj   = EXCLUDED.calories_kj,
+                     motion_var       = EXCLUDED.motion_var,
+                     hr_peaks_per_min = EXCLUDED.hr_peaks_per_min""",
                 (device_id, s["start"], s["end"], s.get("avg_hr"),
                  s.get("peak_hr"), s.get("strain"), s.get("kind"),
                  (int(round(s["duration_s"])) if s.get("duration_s") is not None else None),
                  (json.dumps(zt) if zt is not None else None),
                  s.get("avg_hrr_pct"), s.get("hrmax"), s.get("hrmax_source"),
-                 s.get("calories_kcal"), s.get("calories_kj")))
+                 s.get("calories_kcal"), s.get("calories_kj"),
+                 s.get("motion_var"), s.get("hr_peaks_per_min")))

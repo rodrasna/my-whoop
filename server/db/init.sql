@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS exercise_sessions (
     avg_hrr_pct   REAL,         -- mean Karvonen %HRR over the bout, [0,100]
     hrmax         REAL,         -- effective HRmax used for zone math (bpm)
     hrmax_source  TEXT,         -- "observed" | "tanaka" | "caller" | "unknown"
+    -- Movement-signature fields for activity-type classification. APPROXIMATE.
+    motion_var       REAL,      -- variance of gravity-derived motion intensity over the bout
+    hr_peaks_per_min REAL,      -- HR surges per minute (interval-structure proxy)
     PRIMARY KEY (device_id, start_ts)
 );
 -- Idempotent migration for already-initialised databases (the CREATE … IF NOT EXISTS
@@ -150,6 +153,9 @@ ALTER TABLE exercise_sessions ADD COLUMN IF NOT EXISTS hrmax_source  TEXT;
 -- Calorie estimation (WHOOP/Keytel formula). Populated when a user profile is set.
 ALTER TABLE exercise_sessions ADD COLUMN IF NOT EXISTS calories_kcal REAL;
 ALTER TABLE exercise_sessions ADD COLUMN IF NOT EXISTS calories_kj   REAL;
+-- Movement-signature fields for activity-type classification (added in place on upgrade).
+ALTER TABLE exercise_sessions ADD COLUMN IF NOT EXISTS motion_var       REAL;
+ALTER TABLE exercise_sessions ADD COLUMN IF NOT EXISTS hr_peaks_per_min REAL;
 
 -- User profile (height/weight/age/sex) used for calorie estimation.
 -- One row per device; upserted via POST /v1/profile.

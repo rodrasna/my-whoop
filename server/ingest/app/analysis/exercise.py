@@ -242,6 +242,16 @@ class ExerciseSession:
     calories_kcal: Optional[float] = None
     calories_kj: Optional[float] = None
 
+    # --- movement-signature fields (for activity-type classification) ---
+    #: Population variance of the gravity-derived motion intensity over the bout.
+    #: High = bursty/interval movement (CrossFit-like); low = steady (running).
+    #: ``None`` when the bout has < 2 motion samples. APPROXIMATE.
+    motion_var: Optional[float] = None
+    #: HR surges per minute: count of prominent local maxima in a lightly smoothed
+    #: HR series, normalized by bout minutes. High = interval structure (repeated
+    #: efforts); low = steady-state effort. ``None`` when < 3 HR samples.
+    hr_peaks_per_min: Optional[float] = None
+
 
 # ===========================================================================
 # Helpers
@@ -359,6 +369,63 @@ def _bout_intensity(
     zone_time_pct = {z: round(cnt / n * 100.0, 1) for z, cnt in zone_counts.items()}
     avg_hrr_pct = round(statistics.fmean(pct_hrr_vals), 1)
     return zone_time_pct, avg_hrr_pct
+
+
+def _motion_variance(motion: Sequence[dict], start: float, end: float) -> Optional[float]:
+    """Population variance of finite motion intensity within [start, end].
+
+    A movement-burstiness proxy: interval workouts (sprint/lift/rest cycles)
+    show high variance; steady cardio shows low variance.  ``None`` when fewer
+    than 2 finite samples fall in the window.
+    """
+    vals = [p["intensity"] for p in motion
+            if start <= p["ts"] <= end and math.isfinite(p["intensity"])]
+    if len(vals) < 2:
+        return None
+    return round(statistics.pvariance(vals), 5)
+
+
+def _hr_peaks_per_min(
+    hr_series: Sequence[dict],
+    *,
+    smooth_s: float = 15.0,
+    prominence: float = 4.0,
+) -> Optional[float]:
+    """HR surges per minute over the bout — an interval-structure proxy.
+
+    Lightly smooths the HR series (trailing ``smooth_s`` mean to reject 1 Hz
+    jitter), then counts local maxima that rise at least ``prominence`` bpm
+    above the preceding local minimum, normalized by bout minutes.  Repeated
+    efforts (CrossFit AMRAP/EMOM) produce many surges; steady runs produce few.
+    ``None`` when fewer than 3 HR samples.
+    """
+    ts = [float(r["ts"]) for r in hr_series]
+    bpm = [float(r["bpm"]) for r in hr_series]
+    if len(bpm) < 3:
+        return None
+
+    # Trailing rolling mean over smooth_s seconds.
+    sm: list[float] = []
+    lo = 0
+    for i in range(len(bpm)):
+        while ts[i] - ts[lo] > smooth_s:
+            lo += 1
+        sm.append(statistics.fmean(bpm[lo:i + 1]))
+
+    peaks = 0
+    last_trough = sm[0]
+    for i in range(1, len(sm) - 1):
+        if sm[i] >= sm[i - 1] and sm[i] > sm[i + 1]:        # local maximum
+            if sm[i] - last_trough >= prominence:
+                peaks += 1
+                last_trough = sm[i]                          # reset for next surge
+        elif sm[i] <= sm[i - 1] and sm[i] < sm[i + 1]:       # local minimum
+            last_trough = min(last_trough, sm[i])
+
+    dur_min = (ts[-1] - ts[0]) / 60.0
+    if dur_min <= 0:
+        return None
+    return round(peaks / dur_min, 3)
 
 
 # ===========================================================================
@@ -522,6 +589,8 @@ def detect_exercises(
                 hrmax_source=hrmax_source,
                 calories_kcal=calories_kcal,
                 calories_kj=calories_kj,
+                motion_var=_motion_variance(motion, start, end),
+                hr_peaks_per_min=_hr_peaks_per_min(hr_series),
             )
         )
     return sessions
