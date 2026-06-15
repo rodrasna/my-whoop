@@ -9,8 +9,8 @@ enum WH {
     // MARK: Colors
 
     enum Color {
-        /// Near-black app background
-        static let background      = SwiftUI.Color(hex: "#0B0B0F")
+        /// Near-black app background (WHOOP uses true black on home)
+        static let background      = SwiftUI.Color(hex: "#000000")
         /// Slightly lifted card/surface
         static let surface         = SwiftUI.Color(hex: "#16171C")
         /// Second-level surface (elevated cards, modal backgrounds)
@@ -33,15 +33,27 @@ enum WH {
         static let teal            = SwiftUI.Color(hex: "#00C4B4")
         /// Sleep/duration purple — matches sleep-stage feel
         static let sleepPurple     = SwiftUI.Color(hex: "#7B61FF")
+        /// Sleep ring blue — matches the light-blue "Sueño" ring in the official app
+        static let sleepBlue       = SwiftUI.Color(hex: "#5AA9E6")
 
         // Ring track (faint)
         static let ringTrack       = SwiftUI.Color(white: 1, opacity: 0.08)
 
-        // Sleep stage colors (hypnogram)
-        static let stageDeep       = SwiftUI.Color(hex: "#1A4FBF")  // deep saturated blue
-        static let stageLight      = SwiftUI.Color(hex: "#4A90D9")  // lighter periwinkle blue
-        static let stageRem        = SwiftUI.Color(hex: "#00C4B4")  // cyan / teal
-        static let stageWake       = SwiftUI.Color(hex: "#6E727E")  // muted grey — readable over surface2 (#1F2128)
+        // Sleep stage colors — matched to the official WHOOP app palette:
+        // Awake = grey, Light = lavender-blue, Deep/SWS = magenta-pink, REM = violet.
+        static let stageDeep       = SwiftUI.Color(hex: "#E25FD0")  // SWS — magenta / pink
+        static let stageLight      = SwiftUI.Color(hex: "#7FA6E8")  // light — lavender blue
+        static let stageRem        = SwiftUI.Color(hex: "#9B6DFF")  // REM — violet
+        static let stageWake       = SwiftUI.Color(hex: "#6E727E")  // awake — muted grey
+
+        // Stress monitor bands (official: high = orange, medium = green, low = blue)
+        static let stressHigh      = SwiftUI.Color(hex: "#FF8A00")
+        static let stressMedium    = SwiftUI.Color(hex: "#16EC06")
+        static let stressLow       = SwiftUI.Color(hex: "#0093E7")
+
+        /// Banner morado de calibración (oficial WHOOP)
+        static let calibrationBg     = SwiftUI.Color(hex: "#2D1B33")
+        static let calibrationAccent = SwiftUI.Color(hex: "#E25FD0")
 
         // MARK: - Recovery helper
 
@@ -81,26 +93,31 @@ enum WH {
     // MARK: Typography
 
     enum Font {
-        /// Large rounded numeral — the big metric readout (e.g. "87%", "4.2")
+        // WHOOP's big numerals are a tall, narrow, heavy grotesque — NOT rounded.
+        // We approximate with the system font in its condensed width at heavy weights.
+        // `.width(.condensed)` is iOS 16+ and bakes the narrow look into the token so it
+        // propagates to every readout without per-call-site modifiers.
+
+        /// Large numeral — the big metric readout (e.g. "87%", "4.2")
         static func metricHero(size: CGFloat = 56) -> SwiftUI.Font {
-            .system(size: size, weight: .black, design: .rounded)
+            .system(size: size, weight: .black, design: .default).width(.condensed)
         }
 
         /// Medium metric inside a card
         static func metricLarge(size: CGFloat = 36) -> SwiftUI.Font {
-            .system(size: size, weight: .bold, design: .rounded)
+            .system(size: size, weight: .heavy, design: .default).width(.condensed)
         }
 
         /// Card value (compact)
         static func metricMedium(size: CGFloat = 28) -> SwiftUI.Font {
-            .system(size: size, weight: .semibold, design: .rounded)
+            .system(size: size, weight: .bold, design: .default).width(.condensed)
         }
 
         /// Card title / section header
         static let cardTitle: SwiftUI.Font = .system(size: 11, weight: .semibold, design: .default)
 
         /// Unit label next to a big number
-        static let unit: SwiftUI.Font = .system(size: 15, weight: .medium, design: .rounded)
+        static let unit: SwiftUI.Font = .system(size: 15, weight: .semibold, design: .default)
 
         /// Caption / secondary label
         static let caption: SwiftUI.Font = .system(size: 12, weight: .regular, design: .default)
