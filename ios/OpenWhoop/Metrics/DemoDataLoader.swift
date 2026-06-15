@@ -106,11 +106,12 @@ enum DemoDataLoader {
         }
         let cfZones: [Int: Double] = [0: 4, 1: 9, 2: 18, 3: 24, 4: 28, 5: 17]
         let runZones: [Int: Double] = [0: 5, 1: 16, 2: 36, 3: 33, 4: 8, 5: 2]
+        // CrossFit: movimiento bursty + muchos picos de FC; carrera: estable.
         return [
-            makeWorkout(deviceId: deviceId, start: at(0, hour: 7, minute: 5),  durationMin: 52, kind: nil, avgHr: 148, peakHr: 182, strain: 12.4, zones: cfZones, kcal: 520),
-            makeWorkout(deviceId: deviceId, start: at(-2, hour: 19, minute: 30), durationMin: 47, kind: nil, avgHr: 152, peakHr: 186, strain: 13.1, zones: cfZones, kcal: 498),
-            makeWorkout(deviceId: deviceId, start: at(-3, hour: 8, minute: 15),  durationMin: 34, kind: nil, avgHr: 139, peakHr: 168, strain: 8.6,  zones: runZones, kcal: 360),
-            makeWorkout(deviceId: deviceId, start: at(-5, hour: 18, minute: 50), durationMin: 61, kind: nil, avgHr: 150, peakHr: 188, strain: 14.0, zones: cfZones, kcal: 612),
+            makeWorkout(deviceId: deviceId, start: at(0, hour: 7, minute: 5),  durationMin: 52, kind: nil, avgHr: 148, peakHr: 182, strain: 12.4, zones: cfZones, kcal: 520, motionVar: 0.62, hrPeaks: 0.48),
+            makeWorkout(deviceId: deviceId, start: at(-2, hour: 19, minute: 30), durationMin: 47, kind: nil, avgHr: 152, peakHr: 186, strain: 13.1, zones: cfZones, kcal: 498, motionVar: 0.58, hrPeaks: 0.52),
+            makeWorkout(deviceId: deviceId, start: at(-3, hour: 8, minute: 15),  durationMin: 34, kind: nil, avgHr: 139, peakHr: 168, strain: 8.6,  zones: runZones, kcal: 360, motionVar: 0.14, hrPeaks: 0.06),
+            makeWorkout(deviceId: deviceId, start: at(-5, hour: 18, minute: 50), durationMin: 61, kind: nil, avgHr: 150, peakHr: 188, strain: 14.0, zones: cfZones, kcal: 612, motionVar: 0.66, hrPeaks: 0.50),
         ]
     }
 
@@ -134,14 +135,17 @@ enum DemoDataLoader {
                 avgHr: v.avg,
                 peakHr: v.peak,
                 avgHrrPct: 62,
-                zonePct: cfZones
+                zonePct: cfZones,
+                motionVar: 0.60,
+                hrPeaksPerMin: 0.50
             )
         }
     }
 
     private static func makeWorkout(deviceId: String, start: Date, durationMin: Int, kind: String?,
                                     avgHr: Double, peakHr: Int, strain: Double,
-                                    zones: [Int: Double], kcal: Double) -> Workout {
+                                    zones: [Int: Double], kcal: Double,
+                                    motionVar: Double?, hrPeaks: Double?) -> Workout {
         let startTs = Int(start.timeIntervalSince1970)
         let durationS = durationMin * 60
         return Workout(
@@ -159,7 +163,9 @@ enum DemoDataLoader {
             hrmax: 190,
             hrmaxSource: "tanaka",
             caloriesKcal: kcal,
-            caloriesKj: kcal * 4.184
+            caloriesKj: kcal * 4.184,
+            motionVar: motionVar,
+            hrPeaksPerMin: hrPeaks
         )
     }
 

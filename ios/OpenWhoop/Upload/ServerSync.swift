@@ -453,7 +453,9 @@ final class ServerSync {
                 hrmax: dbl(r, "hrmax"),
                 hrmaxSource: (r["hrmax_source"] as? String) ?? (r["hrmaxSource"] as? String) ?? "",
                 caloriesKcal: dbl(r, "calories_kcal") ?? dbl(r, "caloriesKcal"),
-                caloriesKj: dbl(r, "calories_kj") ?? dbl(r, "caloriesKj")
+                caloriesKj: dbl(r, "calories_kj") ?? dbl(r, "caloriesKj"),
+                motionVar: dbl(r, "motion_var") ?? dbl(r, "motionVar"),
+                hrPeaksPerMin: dbl(r, "hr_peaks_per_min") ?? dbl(r, "hrPeaksPerMin")
             )
         }
         // Server returns ascending; we reverse so newest is first (list view shows newest at top).
@@ -678,4 +680,6 @@ struct Workout: Identifiable, Equatable {
     let hrmaxSource: String
     let caloriesKcal: Double?
     let caloriesKj: Double?
+    let motionVar: Double?           // variance of motion intensity over the bout
+    let hrPeaksPerMin: Double?       // HR surges per minute (interval-structure proxy)
 }

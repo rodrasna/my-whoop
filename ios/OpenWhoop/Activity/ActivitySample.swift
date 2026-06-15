@@ -20,6 +20,8 @@ struct ActivitySample: Codable, Identifiable {
     let peakHr: Double
     let avgHrrPct: Double?
     let zonePct: [Double]      // 6 valores (Z0..Z5), % de tiempo
+    let motionVar: Double?     // varianza de movimiento (firma del servidor)
+    let hrPeaksPerMin: Double? // picos de FC por minuto (estructura de intervalos)
 
     var id: String { workoutId }
 
@@ -40,7 +42,9 @@ struct ActivitySample: Codable, Identifiable {
             avgHr: w.avgHr,
             peakHr: Double(w.peakHr),
             avgHrrPct: w.avgHrrPct,
-            zonePct: zones
+            zonePct: zones,
+            motionVar: w.motionVar,
+            hrPeaksPerMin: w.hrPeaksPerMin
         )
     }
 
@@ -53,7 +57,9 @@ struct ActivitySample: Codable, Identifiable {
             weekday: cal.component(.weekday, from: start),
             durationMin: Double(w.durationS) / 60.0,
             avgHr: w.avgHr,
-            zonePct: (0...5).map { w.zoneTimePct[$0] ?? 0.0 }
+            zonePct: (0...5).map { w.zoneTimePct[$0] ?? 0.0 },
+            motionVar: w.motionVar,
+            hrPeaksPerMin: w.hrPeaksPerMin
         )
     }
 
@@ -63,28 +69,44 @@ struct ActivitySample: Codable, Identifiable {
         let durationMin: Double
         let avgHr: Double
         let zonePct: [Double]
+        let motionVar: Double?
+        let hrPeaksPerMin: Double?
     }
 
     var features: Features {
         Features(startHour: startHour, weekday: weekday,
-                 durationMin: durationMin, avgHr: avgHr, zonePct: zonePct)
+                 durationMin: durationMin, avgHr: avgHr, zonePct: zonePct,
+                 motionVar: motionVar, hrPeaksPerMin: hrPeaksPerMin)
     }
 
-    /// Distancia entre dos firmas en [0, ~1+]. Combina rutina (hora/día) e intensidad
-    /// (duración, FC, reparto por zonas). Pensada para k-NN con pocos datos.
+    /// Distancia entre dos firmas en [0, 1]. Combina rutina (hora/día) e intensidad
+    /// (duración, FC, zonas) y, cuando el servidor las aporta, la firma de movimiento
+    /// (varianza de movimiento, picos de FC/min). Cada término solo cuenta si ambas
+    /// muestras lo tienen; los pesos se renormalizan sobre los términos presentes,
+    /// así que la distancia es comparable haya o no datos de movimiento.
     static func distance(_ a: Features, _ b: Features) -> Double {
+        var sum = 0.0
+        var wsum = 0.0
+        func add(_ weight: Double, _ d: Double) { sum += weight * min(d, 1.0); wsum += weight }
+
         // Hora: circular sobre 24h → 0..1
         let rawHour = Double(abs(a.startHour - b.startHour))
-        let hourDist = min(rawHour, 24 - rawHour) / 12.0
+        add(0.30, min(rawHour, 24 - rawHour) / 12.0)
         // Día de semana: mismo día = 0, distinto = 1
-        let dayDist: Double = a.weekday == b.weekday ? 0 : 1
-        // Duración: |Δ|/30min, cap 1
-        let durDist = min(abs(a.durationMin - b.durationMin) / 30.0, 1.0)
-        // FC media: |Δ|/30 lpm, cap 1
-        let hrDist = min(abs(a.avgHr - b.avgHr) / 30.0, 1.0)
-        // Reparto por zonas: suma de |Δ%|/100, normalizado a 0..1
-        let zoneDist = min(zip(a.zonePct, b.zonePct).reduce(0.0) { $0 + abs($1.0 - $1.1) } / 100.0, 1.0)
-        // Pesos: la rutina manda; la firma de intensidad afina.
-        return 0.35 * hourDist + 0.20 * dayDist + 0.15 * durDist + 0.10 * hrDist + 0.20 * zoneDist
+        add(0.18, a.weekday == b.weekday ? 0 : 1)
+        // Duración: |Δ|/30min
+        add(0.12, abs(a.durationMin - b.durationMin) / 30.0)
+        // FC media: |Δ|/30 lpm
+        add(0.10, abs(a.avgHr - b.avgHr) / 30.0)
+        // Reparto por zonas: suma de |Δ%|/100
+        add(0.15, zip(a.zonePct, b.zonePct).reduce(0.0) { $0 + abs($1.0 - $1.1) } / 100.0)
+        // Firma de movimiento (opcional): varianza de movimiento y picos de FC/min.
+        if let av = a.motionVar, let bv = b.motionVar {
+            add(0.08, abs(av - bv) / 1.0)
+        }
+        if let ap = a.hrPeaksPerMin, let bp = b.hrPeaksPerMin {
+            add(0.07, abs(ap - bp) / 1.0)
+        }
+        return wsum > 0 ? sum / wsum : 1.0
     }
 }
