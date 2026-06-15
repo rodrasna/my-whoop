@@ -58,7 +58,7 @@ struct HypnogramView: View {
         let nightDuration = nightEnd - nightStart
 
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            Text("SLEEP STAGES")
+            Text("ETAPAS DEL SUEÑO")
                 .font(WH.Font.cardTitle)
                 .foregroundStyle(WH.Color.textSecondary)
                 .tracking(1.5)
@@ -72,12 +72,14 @@ struct HypnogramView: View {
                         VStack(alignment: .trailing, spacing: 3) {
                             ForEach(laneOrder, id: \.self) { lane in
                                 Text(laneLabel(lane))
-                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                    .font(.system(size: 9, weight: .semibold))
                                     .foregroundStyle(stageColor(lane).opacity(0.85))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.6)
                                     .frame(height: 28)
                             }
                         }
-                        .frame(width: 36)
+                        .frame(width: 52)
 
                         // Track area
                         VStack(spacing: 3) {
@@ -95,7 +97,7 @@ struct HypnogramView: View {
 
                     // Time axis (inset to align with track area)
                     HStack(spacing: WH.Spacing.sm) {
-                        Spacer().frame(width: 36 + WH.Spacing.sm)
+                        Spacer().frame(width: 52 + WH.Spacing.sm)
                         timeAxis(
                             nightStart: nightStart,
                             nightEnd: nightEnd,
@@ -111,7 +113,7 @@ struct HypnogramView: View {
                 hypnogramLegend
 
             } else {
-                Text("No stage data for last night")
+                Text("Sin datos de etapas de anoche")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
                     .padding(WH.Spacing.md)
@@ -126,10 +128,10 @@ struct HypnogramView: View {
 
     private func laneLabel(_ lane: String) -> String {
         switch lane {
-        case "wake":  return "AWAKE"
+        case "wake":  return "DESPIERTO"
         case "rem":   return "REM"
-        case "light": return "LIGHT"
-        case "deep":  return "DEEP"
+        case "light": return "LIGERO"
+        case "deep":  return "PROFUNDO"
         default:      return lane.uppercased()
         }
     }
@@ -207,10 +209,10 @@ struct HypnogramView: View {
 
     private var hypnogramLegend: some View {
         HStack(spacing: WH.Spacing.md) {
-            ForEach([("DEEP", WH.Color.stageDeep),
+            ForEach([("PROFUNDO", WH.Color.stageDeep),
                      ("REM", WH.Color.stageRem),
-                     ("LIGHT", WH.Color.stageLight),
-                     ("AWAKE", WH.Color.stageWake)], id: \.0) { label, color in
+                     ("LIGERO", WH.Color.stageLight),
+                     ("DESPIERTO", WH.Color.stageWake)], id: \.0) { label, color in
                 HStack(spacing: WH.Spacing.xs) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(color)

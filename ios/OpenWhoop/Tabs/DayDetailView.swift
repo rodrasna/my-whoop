@@ -65,7 +65,7 @@ struct DayDetailView: View {
         let pct = metric.recovery.map { $0 * 100 }
         let color = pct.map { WH.Color.recoveryColor(forPercent: $0) } ?? WH.Color.textSecondary
         return MetricCard(
-            title: "Recovery",
+            title: "Recuperación",
             value: pct.map { String(format: "%.0f", $0) } ?? "—",
             unit: pct != nil ? "%" : nil,
             accentColor: color
@@ -76,7 +76,7 @@ struct DayDetailView: View {
 
     private var strainCard: some View {
         MetricCard(
-            title: "Day Strain",
+            title: "Esfuerzo diario",
             value: metric.strain.map { String(format: "%.1f", $0) } ?? "—",
             unit: metric.strain != nil ? "/ 21" : nil,
             accentColor: metric.strain != nil ? WH.Color.strainBlue : WH.Color.textSecondary
@@ -87,18 +87,18 @@ struct DayDetailView: View {
 
     private var sleepSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("Sleep")
+            sectionHeader("Sueño")
 
             // Total + efficiency
             VStack(alignment: .leading, spacing: WH.Spacing.xs) {
                 HStack {
-                    Text("TOTAL SLEEP")
+                    Text("SUEÑO TOTAL")
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
                     Spacer()
                     if let eff = metric.efficiency {
-                        Text("\(Int((eff * 100).rounded()))% efficiency")
+                        Text("\(Int((eff * 100).rounded()))% eficiencia")
                             .font(WH.Font.caption)
                             .foregroundStyle(WH.Color.textSecondary)
                     }
@@ -114,9 +114,9 @@ struct DayDetailView: View {
 
             // Stage breakdown
             HStack(spacing: WH.Spacing.sm) {
-                stageCell(label: "DEEP",  color: WH.Color.stageDeep,  minutes: metric.deepMin)
-                stageCell(label: "REM",   color: WH.Color.stageRem,   minutes: metric.remMin)
-                stageCell(label: "LIGHT", color: WH.Color.stageLight, minutes: metric.lightMin)
+                stageCell(label: "PROFUNDO",  color: WH.Color.stageDeep,  minutes: metric.deepMin)
+                stageCell(label: "REM",       color: WH.Color.stageRem,   minutes: metric.remMin)
+                stageCell(label: "LIGERO",    color: WH.Color.stageLight, minutes: metric.lightMin)
             }
 
             // Disturbances
@@ -125,7 +125,7 @@ struct DayDetailView: View {
                     Image(systemName: "exclamationmark.circle")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(WH.Color.textSecondary)
-                    Text("\(dist) disturbance\(dist == 1 ? "" : "s")")
+                    Text("\(dist) interrupción\(dist == 1 ? "" : "es")")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                     Spacer()
@@ -159,20 +159,20 @@ struct DayDetailView: View {
 
     private var bodySignalsSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            sectionHeader("Body Signals")
+            sectionHeader("Señales corporales")
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
                       spacing: WH.Spacing.sm) {
                 MetricCard(
-                    title: "HRV",
+                    title: "VFC",
                     value: metric.avgHrv.map { String(format: "%.0f", $0) } ?? "—",
                     unit: metric.avgHrv != nil ? "ms" : nil,
                     accentColor: metric.avgHrv != nil ? WH.Color.recoveryGreen : WH.Color.textSecondary
                 )
                 MetricCard(
-                    title: "Resting HR",
+                    title: "FC en reposo",
                     value: metric.restingHr.map { "\($0)" } ?? "—",
-                    unit: metric.restingHr != nil ? "bpm" : nil,
+                    unit: metric.restingHr != nil ? "lpm" : nil,
                     accentColor: metric.restingHr != nil ? WH.Color.textPrimary : WH.Color.textSecondary
                 )
                 MetricCard(
@@ -182,13 +182,13 @@ struct DayDetailView: View {
                     accentColor: metric.spo2Pct != nil ? WH.Color.textPrimary : WH.Color.textSecondary
                 )
                 MetricCard(
-                    title: "Resp Rate",
+                    title: "Frec. respiratoria",
                     value: metric.respRateBpm.map { String(format: "%.1f", $0) } ?? "—",
                     unit: metric.respRateBpm != nil ? "/min" : nil,
                     accentColor: metric.respRateBpm != nil ? WH.Color.strainBlue : WH.Color.textSecondary
                 )
                 MetricCard(
-                    title: "Skin Temp Dev",
+                    title: "Desv. temp. piel",
                     value: {
                         guard let t = metric.skinTempDevC else { return "—" }
                         return String(format: "%+.1f", t)
@@ -198,7 +198,7 @@ struct DayDetailView: View {
                 )
                 if let ex = metric.exerciseCount {
                     MetricCard(
-                        title: "Workouts",
+                        title: "Entrenamientos",
                         value: "\(ex)",
                         accentColor: WH.Color.strainBlue
                     )
