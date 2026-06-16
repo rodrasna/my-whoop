@@ -1,6 +1,6 @@
 # Task 08 — Monitor de estrés intradía
 
-> **Estado:** Siguiente tarea activa · **Prioridad:** Alta · **Última actualización:** 2026-06-16  
+> **Estado:** Fase A en progreso (servidor + iOS lectura) · **Prioridad:** Alta · **Última actualización:** 2026-06-16  
 > **Objetivo:** Sustituir el placeholder «Próximamente» en `StressMonitorCard` por un score de estrés diurno real (estilo WHOOP Stress Monitor 0–3), calculado en el **servidor** a partir de HR + RR + movimiento.
 
 ---
@@ -294,19 +294,18 @@ Reemplazar `chartContent` placeholder por `Swift Charts` (igual que otras vistas
 
 ### Fase A — Servidor core (MVP)
 
-- [ ] `stress.py` con `compute_stress_windows(streams, workouts, baseline) -> list[StressWindow]`
-- [ ] Tests unitarios: ventana sintética RR → RMSSD conocido; motion gate; exclusión workout
-- [ ] SQL + store insert/query
-- [ ] `GET /v1/stress`
-- [ ] Hook en `compute_daily` para día recién calculado
-- [ ] Verificar con `curl` + dashboard
+- [x] `stress.py` con ventanas + score 0–3 + motion/workout gates
+- [x] Tests unitarios `test_stress.py`
+- [x] SQL `stress_samples` + store/read
+- [x] `GET /v1/stress`
+- [x] Hook en `compute_day`
+- [ ] Verificar con datos reales + `curl`
 
 ### Fase B — iOS UI
 
-- [ ] `ServerSync.fetchStress`
-- [ ] `StressMonitorCard` con curva 24 h
-- [ ] Estados: calibrando / sin datos / normal
-- [ ] Build + prueba en dispositivo
+- [x] `ServerSync.fetchStress` + `StressPoint`
+- [x] `StressMonitorCard` con curva (Swift Charts)
+- [ ] Calibración en campo (ajustar pesos)
 
 ### Fase C — Calibración
 

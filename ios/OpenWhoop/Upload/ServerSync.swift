@@ -691,6 +691,26 @@ final class ServerSync {
         return try? JSONDecoder().decode(PRVNWeekPayload.self, from: data)
     }
 
+    /// GET /v1/stress?from=&to= (YYYY-MM-DD, inclusive).
+    func fetchStress(fromDay: String, toDay: String) async -> [StressPoint] {
+        let path = "/v1/stress?device=\(deviceId)&from=\(fromDay)&to=\(toDay)"
+        guard let data = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return []
+        }
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fmtPlain = ISO8601DateFormatter()
+        return arr.compactMap { row -> StressPoint? in
+            guard let tsStr = row["ts"] as? String else { return nil }
+            let date = fmt.date(from: tsStr) ?? fmtPlain.date(from: tsStr)
+            guard let date else { return nil }
+            let score = (row["score"] as? NSNumber)?.doubleValue
+            let quality = row["quality"] as? String ?? "good"
+            return StressPoint(ts: Int(date.timeIntervalSince1970), score: score, quality: quality)
+        }
+    }
+
     // MARK: - Workout calorie backfill
 
     /// POST /v1/backfill-workouts {device, from, to} (YYYY-MM-DD UTC).

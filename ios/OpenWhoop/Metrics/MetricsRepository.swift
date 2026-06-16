@@ -446,6 +446,14 @@ final class MetricsRepository: ObservableObject {
         return await serverSync?.getWorkouts(from: from, to: to) ?? []
     }
 
+    /// Ventanas de estrés intradía (servidor) para un día calendario local.
+    func stressPoints(for day: Date) async -> [StressPoint] {
+        await ensureOpen()
+        guard let serverSync, isServerConfigured, !isDemoPreviewActive else { return [] }
+        let key = Self.localDayString(for: day)
+        return await serverSync.fetchStress(fromDay: key, toDay: key)
+    }
+
     /// Añade subidas de FC detectadas en el cliente para un día concreto.
     func supplementHRElevations(in workouts: [Workout], for day: Date, restingHr: Int?) async -> [Workout] {
         await ensureOpen()

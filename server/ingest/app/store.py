@@ -109,9 +109,10 @@ def upsert_daily_metrics(conn: psycopg.Connection, device_id: str, day, metrics:
         """INSERT INTO daily_metrics
            (device_id, day, total_sleep_min, efficiency, deep_min, rem_min, light_min,
             disturbances, resting_hr, avg_hrv, recovery, strain, exercise_count,
-            sleep_start, sleep_end, spo2_pct, skin_temp_dev_c, resp_rate_bpm, computed_at)
+            sleep_start, sleep_end, spo2_pct, skin_temp_dev_c, resp_rate_bpm,
+            stress_avg, stress_peak, computed_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   to_timestamp(%s), to_timestamp(%s), %s, %s, %s, now())
+                   to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s, now())
            ON CONFLICT (device_id, day) DO UPDATE SET
              total_sleep_min = EXCLUDED.total_sleep_min,
              efficiency      = EXCLUDED.efficiency,
@@ -129,13 +130,16 @@ def upsert_daily_metrics(conn: psycopg.Connection, device_id: str, day, metrics:
              spo2_pct        = EXCLUDED.spo2_pct,
              skin_temp_dev_c = EXCLUDED.skin_temp_dev_c,
              resp_rate_bpm   = EXCLUDED.resp_rate_bpm,
+             stress_avg      = EXCLUDED.stress_avg,
+             stress_peak     = EXCLUDED.stress_peak,
              computed_at     = now()""",
         (device_id, day, metrics.get("total_sleep_min"), metrics.get("efficiency"),
          metrics.get("deep_min"), metrics.get("rem_min"), metrics.get("light_min"),
          metrics.get("disturbances"), metrics.get("resting_hr"), metrics.get("avg_hrv"),
          metrics.get("recovery"), metrics.get("strain"), metrics.get("exercise_count"),
          metrics.get("sleep_start"), metrics.get("sleep_end"),
-         metrics.get("spo2_pct"), metrics.get("skin_temp_dev_c"), metrics.get("resp_rate_bpm")),
+         metrics.get("spo2_pct"), metrics.get("skin_temp_dev_c"), metrics.get("resp_rate_bpm"),
+         metrics.get("stress_avg"), metrics.get("stress_peak")),
     )
 
 
@@ -240,3 +244,33 @@ def upsert_exercise_sessions(conn: psycopg.Connection, device_id: str, sessions)
                  s.get("avg_hrr_pct"), s.get("hrmax"), s.get("hrmax_source"),
                  s.get("calories_kcal"), s.get("calories_kj"),
                  s.get("motion_var"), s.get("hr_peaks_per_min")))
+
+
+def delete_stress_for_day(conn: psycopg.Connection, device_id: str, day) -> None:
+    """Remove stress windows attributed to calendar ``day`` (UTC)."""
+    conn.execute(
+        """DELETE FROM stress_samples
+           WHERE device_id = %s
+           AND ts >= %s::date AT TIME ZONE 'UTC'
+           AND ts <  (%s::date + INTERVAL '1 day') AT TIME ZONE 'UTC'""",
+        (device_id, day, day),
+    )
+
+
+def upsert_stress_samples(conn: psycopg.Connection, device_id: str, samples) -> None:
+    """Upsert intraday stress windows (PK device_id, ts). ``ts`` is epoch seconds."""
+    with conn.cursor() as cur:
+        for s in samples:
+            cur.execute(
+                """INSERT INTO stress_samples
+                   (device_id, ts, score, rmssd_ms, hr_bpm, motion_var, quality)
+                   VALUES (%s, to_timestamp(%s), %s, %s, %s, %s, %s)
+                   ON CONFLICT (device_id, ts) DO UPDATE SET
+                     score      = EXCLUDED.score,
+                     rmssd_ms   = EXCLUDED.rmssd_ms,
+                     hr_bpm     = EXCLUDED.hr_bpm,
+                     motion_var = EXCLUDED.motion_var,
+                     quality    = EXCLUDED.quality""",
+                (device_id, s["ts"], s.get("score"), s.get("rmssd_ms"),
+                 s.get("hr_bpm"), s.get("motion_var"), s.get("quality")),
+            )

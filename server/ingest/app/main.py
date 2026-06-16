@@ -377,6 +377,32 @@ def get_workouts(device: str,
         return read.query_workouts(conn, device, start, end)
 
 
+@app.get("/v1/stress", dependencies=[Depends(require_auth)])
+def get_stress(device: str,
+               from_: str = Query(..., alias="from"),
+               to: str = Query(..., alias="to")):
+    """Intraday stress windows (5-min) for dates in [from, to] inclusive (YYYY-MM-DD)."""
+    start, end = _parse_date(from_), _parse_date(to)
+    with psycopg.connect(cfg.db_dsn) as conn:
+        rows = read.query_stress_samples(conn, device, start, end)
+    out = []
+    for r in rows:
+        ts = r["ts"]
+        if isinstance(ts, (int, float)):
+            iso = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat()
+        else:
+            iso = ts.isoformat() if hasattr(ts, "isoformat") else ts
+        out.append({
+            "ts": iso,
+            "score": r.get("score"),
+            "rmssd_ms": r.get("rmssd_ms"),
+            "hr_bpm": r.get("hr_bpm"),
+            "motion_var": r.get("motion_var"),
+            "quality": r.get("quality"),
+        })
+    return out
+
+
 # ── Backfill workouts endpoint ────────────────────────────────────────────────
 
 class BackfillWorkouts(BaseModel):

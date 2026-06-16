@@ -351,6 +351,47 @@ def query_workouts(conn, device_id, start_date, end_date):
     return [dict(zip(_WORKOUT_COLS, r)) for r in rows]
 
 
+_STRESS_COLS = ["device_id", "ts", "score", "rmssd_ms", "hr_bpm", "motion_var", "quality"]
+
+
+def query_stress_samples(conn, device_id, start_date, end_date):
+    """Stress windows with ts (UTC date) in [start_date, end_date] inclusive.
+
+    Returns dicts with ``ts`` as epoch float (for analysis) plus numeric fields.
+    """
+    rows = conn.execute(
+        f"""SELECT {', '.join(_STRESS_COLS)}
+            FROM stress_samples
+            WHERE device_id = %s
+            AND (ts AT TIME ZONE 'UTC')::date >= %s
+            AND (ts AT TIME ZONE 'UTC')::date <= %s
+            ORDER BY ts""",
+        (device_id, start_date, end_date),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(_STRESS_COLS, r))
+        ts = d["ts"]
+        if hasattr(ts, "timestamp"):
+            d["ts"] = ts.timestamp()
+        out.append(d)
+    return out
+
+
+def query_stress_day(conn, device_id, day):
+    """Stress windows for a single calendar day (API: ISO ts strings)."""
+    rows = conn.execute(
+        f"""SELECT {', '.join(_STRESS_COLS)}
+            FROM stress_samples
+            WHERE device_id = %s
+            AND ts >= %s::date AT TIME ZONE 'UTC'
+            AND ts <  (%s::date + INTERVAL '1 day') AT TIME ZONE 'UTC'
+            ORDER BY ts""",
+        (device_id, day, day),
+    ).fetchall()
+    return [dict(zip(_STRESS_COLS, r)) for r in rows]
+
+
 from whoop_protocol import parse_frame
 
 

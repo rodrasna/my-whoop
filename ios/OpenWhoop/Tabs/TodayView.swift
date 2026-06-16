@@ -19,6 +19,7 @@ struct TodayView: View {
     @State private var selectedDate = Date()
     @State private var selectedDayMetric: DailyMetric?
     @State private var selectedNightSleep: CachedSleepSession?
+    @State private var stressPoints: [StressPoint] = []
 
     // Alarm state (shared with the Sleep tab via UserDefaults) for the "tonight" card.
     @AppStorage(AlarmKeys.enabled)      private var alarmEnabled   = false
@@ -96,14 +97,15 @@ struct TodayView: View {
     }
 
     private func reloadSelectedDay() async {
-        guard !isViewingToday else {
+        if isViewingToday {
             selectedDayMetric = nil
-            selectedNightSleep = nil
-            return
+            selectedNightSleep = metrics.lastNight
+        } else {
+            let day = MetricsRepository.localDayString(for: selectedDate)
+            selectedDayMetric = await metrics.dailyMetric(forDay: day)
+            selectedNightSleep = await metrics.sleepSession(endingOnDay: day)
         }
-        let day = MetricsRepository.localDayString(for: selectedDate)
-        selectedDayMetric = await metrics.dailyMetric(forDay: day)
-        selectedNightSleep = await metrics.sleepSession(endingOnDay: day)
+        stressPoints = await metrics.stressPoints(for: selectedDate)
     }
 
     private func reloadSleepNights() async {
@@ -537,7 +539,8 @@ struct TodayView: View {
         StressMonitorCard(
             completedNights: sleepNights,
             sleepStartTs: nightSleep?.startTs,
-            sleepEndTs: nightSleep?.endTs
+            sleepEndTs: nightSleep?.endTs,
+            points: stressPoints
         )
     }
 

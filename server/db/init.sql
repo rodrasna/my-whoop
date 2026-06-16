@@ -201,3 +201,20 @@ ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS sleep_end       TIMESTAMPTZ;
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS spo2_pct        REAL;
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS skin_temp_dev_c REAL;
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS resp_rate_bpm   REAL;
+
+-- Intraday stress (5-min windows, server-computed — see analysis/stress.py)
+CREATE TABLE IF NOT EXISTS stress_samples (
+    device_id   TEXT NOT NULL,
+    ts          TIMESTAMPTZ NOT NULL,
+    score       REAL,
+    rmssd_ms    REAL,
+    hr_bpm      SMALLINT,
+    motion_var  REAL,
+    quality     TEXT NOT NULL DEFAULT 'good',
+    PRIMARY KEY (device_id, ts)
+);
+SELECT create_hypertable('stress_samples', 'ts', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS stress_samples_device_ts ON stress_samples (device_id, ts DESC);
+
+ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS stress_avg  REAL;
+ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS stress_peak REAL;

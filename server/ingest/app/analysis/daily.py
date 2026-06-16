@@ -71,6 +71,7 @@ from . import hrv as _hrv
 from . import recovery as _recovery
 from . import sleep as _sleep
 from . import strain as _strain
+from . import stress as _stress
 from . import units as _units
 from . import baselines as _baselines
 from ._utils import to_epoch
@@ -464,6 +465,9 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         profile=device_profile)
     all_exercises = _exercise.dedupe_overlapping_sessions(exercises + elevations)
 
+    stress_summary = _stress.compute_stress_day(
+        conn, device_id, day, day_streams, all_exercises)
+
     # ── Calibrated nightly signals (APPROXIMATE; over the sleep window) ───────
     signals = _nightly_signals(conn, device_id, day, streams, night_start, night_end)
 
@@ -487,6 +491,8 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         "spo2_pct": signals["spo2_pct"],
         "skin_temp_dev_c": signals["skin_temp_dev_c"],
         "resp_rate_bpm": signals["resp_rate_bpm"],
+        "stress_avg": stress_summary.get("stress_avg"),
+        "stress_peak": stress_summary.get("stress_peak"),
     }
     # Delete the day's existing session rows first, then insert the fresh set, so a
     # recompute yielding FEWER sessions can't leave stale rows (which would desync
@@ -509,4 +515,5 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         "spo2_pct": signals["spo2_pct"],
         "skin_temp_dev_c": signals["skin_temp_dev_c"],
         "resp_rate_bpm": signals["resp_rate_bpm"],
+        "stress": stress_summary,
     }

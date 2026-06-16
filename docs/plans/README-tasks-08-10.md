@@ -4,7 +4,7 @@ Tres tareas documentadas para ejecutar **en orden**. Cada una tiene su propio ma
 
 | Orden | ID | Tarea | Documento | Estado |
 |------:|----|-------|-----------|--------|
-| **1** | 08 | Monitor de estrés intradía (WHOOP-style) | [task-08-stress-monitor.md](./task-08-stress-monitor.md) | **Siguiente** — implementar |
+| **1** | 08 | Monitor de estrés intradía (WHOOP-style) | [task-08-stress-monitor.md](./task-08-stress-monitor.md) | **En progreso** — Fase A/B código |
 | 2 | 09 | Coach de rendimiento en entreno (reglas + LLM opcional) | [task-09-training-performance-coach.md](./task-09-training-performance-coach.md) | Pendiente (tras 08) |
 | 3 | 10 | Servidor online (Hetzner CX22 + Cloudflare Tunnel) | [task-10-hetzner-hosting.md](./task-10-hetzner-hosting.md) | Pendiente (infra; puede solaparse con 08 si el servidor ya está en casa) |
 
