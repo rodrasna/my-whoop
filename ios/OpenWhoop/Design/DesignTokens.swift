@@ -12,7 +12,7 @@ enum WH {
         /// Near-black app background (WHOOP uses true black on home)
         static let background      = SwiftUI.Color(hex: "#000000")
         /// Slightly lifted card/surface
-        static let surface         = SwiftUI.Color(hex: "#16171C")
+        static let surface         = SwiftUI.Color(hex: "#1C1C1E")
         /// Second-level surface (elevated cards, modal backgrounds)
         static let surface2        = SwiftUI.Color(hex: "#1F2128")
         /// Primary text — full white
@@ -38,6 +38,8 @@ enum WH {
 
         // Ring track (faint)
         static let ringTrack       = SwiftUI.Color(white: 1, opacity: 0.08)
+        /// Slightly brighter outer track (official rings have a soft halo track)
+        static let ringTrackOuter  = SwiftUI.Color(white: 1, opacity: 0.04)
 
         // Sleep stage colors — matched to the official WHOOP app palette:
         // Awake = grey, Light = lavender-blue, Deep/SWS = magenta-pink, REM = violet.
@@ -121,6 +123,33 @@ enum WH {
 
         /// Caption / secondary label
         static let caption: SwiftUI.Font = .system(size: 12, weight: .regular, design: .default)
+
+        /// Center numeral inside progress rings (condensed, heavy — official WHOOP style)
+        static func ringValue(size: CGFloat, weight: SwiftUI.Font.Weight = .heavy) -> SwiftUI.Font {
+            .system(size: size, weight: weight, design: .default).width(.condensed)
+        }
+
+        /// Uppercase label below a ring
+        static func ringLabel(size: CGFloat = 10) -> SwiftUI.Font {
+            .system(size: size, weight: .bold, design: .default)
+        }
+    }
+
+    // MARK: Ring geometry
+
+    enum Ring {
+        /// Detail screens (tap ring from Hoy / Actividad) — compact, consistent hero.
+        static let detailHeroDiameter: CGFloat = 176
+        /// Header tri-ring stroke (~6 pt at 96 px diameter)
+        static func headerStroke(diameter: CGFloat) -> CGFloat { max(5, diameter * 0.062) }
+        /// Hero ring stroke (~12–14 pt at 200 px)
+        static func heroStroke(diameter: CGFloat) -> CGFloat { max(10, diameter * 0.068) }
+        static let glowOpacity: Double = 0.32
+        static let glowBlur: CGFloat = 5
+
+        static func strainPercent(_ strain: Double) -> Int {
+            Int((min(21, max(0, strain)) / 21 * 100).rounded())
+        }
     }
 }
 

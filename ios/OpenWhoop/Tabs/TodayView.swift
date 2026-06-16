@@ -11,10 +11,14 @@ struct TodayView: View {
     @EnvironmentObject private var live: LiveViewModel
 
     @State private var weekRows: [DailyMetric] = []
-    @State private var baselines = BaselineCalculator.Averages()
     @State private var sleepNights = 0
     @State private var ringDestination: RingDestination?
     @State private var showingAlarm = false
+    @State private var showingDevice = false
+    @StateObject private var strapTimer = StrapTimerController.shared
+    @State private var selectedDate = Date()
+    @State private var selectedDayMetric: DailyMetric?
+    @State private var selectedNightSleep: CachedSleepSession?
 
     // Alarm state (shared with the Sleep tab via UserDefaults) for the "tonight" card.
     @AppStorage(AlarmKeys.enabled)      private var alarmEnabled   = false
@@ -41,40 +45,84 @@ struct TodayView: View {
                 AlarmView()
                     .environmentObject(live)
             }
+            .sheet(isPresented: $showingDevice) {
+                NavigationStack {
+                    LiveView()
+                        .environmentObject(live)
+                }
+                .presentationDragIndicator(.visible)
+            }
         }
         .preferredColorScheme(.dark)
         .task {
             await metrics.refresh()
+            await reloadSelectedDay()
             await reloadWeek()
-            await reloadBaselines()
+            await reloadSleepNights()
         }
         .refreshable {
             await metrics.refresh()
+            await reloadSelectedDay()
             await reloadWeek()
-            await reloadBaselines()
+            await reloadSleepNights()
         }
         .onChange(of: metrics.lastRefreshedAt) { _ in
             Task {
+                await reloadSelectedDay()
                 await reloadWeek()
-                await reloadBaselines()
+                await reloadSleepNights()
+            }
+        }
+        .onChange(of: selectedDate) { _ in
+            Task {
+                await reloadSelectedDay()
+                await reloadWeek()
             }
         }
     }
 
-    private func reloadBaselines() async {
-        baselines = await metrics.thirtyDayBaselines()
+    // MARK: - Selected day context
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(selectedDate)
+    }
+
+    private var dayMetric: DailyMetric? {
+        isViewingToday ? metrics.today : selectedDayMetric
+    }
+
+    private var nightSleep: CachedSleepSession? {
+        isViewingToday ? metrics.lastNight : selectedNightSleep
+    }
+
+    private func reloadSelectedDay() async {
+        guard !isViewingToday else {
+            selectedDayMetric = nil
+            selectedNightSleep = nil
+            return
+        }
+        let day = MetricsRepository.localDayString(for: selectedDate)
+        selectedDayMetric = await metrics.dailyMetric(forDay: day)
+        selectedNightSleep = await metrics.sleepSession(endingOnDay: day)
+    }
+
+    private func reloadSleepNights() async {
         sleepNights = await metrics.sleepNightCount()
     }
 
+    private var yesterdayMetric: DailyMetric? {
+        TodayMetricHelpers.dailyMetric(
+            offset: -1,
+            anchor: selectedDate,
+            today: metrics.today,
+            selected: selectedDayMetric,
+            weekRows: weekRows,
+            isViewingToday: isViewingToday
+        )
+    }
+
     private func reloadWeek() async {
-        let cal = Calendar(identifier: .gregorian)
-        let fmt = DateFormatter()
-        fmt.calendar = cal
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        fmt.dateFormat = "yyyy-MM-dd"
-        let today = Date()
-        let from = cal.date(byAdding: .day, value: -6, to: today) ?? today
-        weekRows = await metrics.daily(fromDay: fmt.string(from: from), toDay: fmt.string(from: today))
+        weekRows = await metrics.dailyLastDays(7, endingOn: selectedDate)
     }
 
     // MARK: - Loading
@@ -92,17 +140,27 @@ struct TodayView: View {
 
     // MARK: - Main scroll content
 
+    private var recoveryDisplay: (fraction: Double, provisional: Bool)? {
+        guard let r = TodayMetricHelpers.recoveryPercent(
+            sleep: nightSleep, daily: dayMetric, sleepNights: sleepNights
+        ) else { return nil }
+        return (r.percent / 100.0, r.provisional)
+    }
+
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
-                // Custom tight header (replaces the hidden system large-title nav bar)
-                ScreenHeader("Hoy")
+                // Day navigator + strap status (official-style top chrome)
+                TodayTopBar(selectedDate: $selectedDate,
+                            liveState: live.state,
+                            onDeviceTap: { showingDevice = true })
 
                 // Anillos Sueño · Recuperación · Esfuerzo (estilo WHOOP)
                 TriRingHeader(sleepFraction: sleepFraction,
-                              recoveryFraction: metrics.today?.recovery,
-                              strain: metrics.today?.strain,
+                              recoveryFraction: recoveryDisplay?.fraction,
+                              recoveryProvisional: recoveryDisplay?.provisional ?? false,
+                              strain: dayMetric?.strain,
                               onSleepTap: { ringDestination = .sleep },
                               onRecoveryTap: { ringDestination = .recovery },
                               onStrainTap: { ringDestination = .strain })
@@ -111,7 +169,10 @@ struct TodayView: View {
                 if sleepNights < 4 && !metrics.isDemoPreviewActive {
                     CalibrationBanner(
                         completedNights: sleepNights,
-                        title: "Calibrando tu recuperación"
+                        title: "Calibrando tu recuperación",
+                        footnote: recoveryDisplay != nil
+                            ? "Recuperación visible pero provisional — con 4 noches usará tu baseline personal"
+                            : nil
                     )
                 }
 
@@ -125,10 +186,10 @@ struct TodayView: View {
 
                 miDiaSection
 
-                sectionLabel("Mi panel de control")
+                sectionLabel("Mi panel de control · \(TodayMetricHelpers.todayLabel(for: selectedDate, isViewingToday: isViewingToday))")
                 groupedDashboard
 
-                if !weekRows.isEmpty || metrics.today?.strain != nil {
+                if !weekRows.isEmpty || dayMetric?.strain != nil {
                     sectionLabel("Tendencias semanales")
                     weeklyTrendsSection
                 }
@@ -139,11 +200,10 @@ struct TodayView: View {
                     errorBanner(err)
                 }
 
-                if metrics.today == nil && metrics.lastNight == nil && !metrics.isRefreshing {
+                if dayMetric == nil && nightSleep == nil && !metrics.isRefreshing {
                     emptyState
                 }
 
-                strapNote
                 syncFooter
 
                 Spacer(minLength: WH.Spacing.xl)
@@ -169,9 +229,9 @@ struct TodayView: View {
 
     /// True when server is up but last night has no sleep session yet.
     private var needsMorningSync: Bool {
-        let noSleep = (metrics.today?.totalSleepMin ?? 0) <= 0
-            && metrics.lastNight == nil
-        let noRecovery = metrics.today?.recovery == nil
+        guard isViewingToday else { return false }
+        let noSleep = (dayMetric?.totalSleepMin ?? 0) <= 0 && nightSleep == nil
+        let noRecovery = dayMetric?.recovery == nil
         return noSleep && noRecovery
     }
 
@@ -223,13 +283,17 @@ struct TodayView: View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             sectionLabel("Mi día")
             actividadHoyCard
-            suenoEstaNocheCard
+            if isViewingToday {
+                suenoEstaNocheCard
+                StrapTimerCard(timer: strapTimer)
+                    .environmentObject(live)
+            }
         }
     }
 
     /// Tarjeta "Actividades de hoy" — fila de la sesión de sueño de anoche (datos reales).
     private var actividadHoyCard: some View {
-        let s = metrics.lastNight
+        let s = nightSleep
         return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             Text("ACTIVIDADES DE HOY")
                 .font(WH.Font.cardTitle)
@@ -414,6 +478,20 @@ struct TodayView: View {
 
     private var weeklyTrendsSection: some View {
         VStack(spacing: WH.Spacing.sm) {
+            let activityPts = WeeklyChartBuilder.last7Days(from: weekRows) {
+                $0.exerciseCount.map { Double($0) }
+            }
+            if activityPts.contains(where: { $0.value > 0 }) {
+                NavigationLink(destination: WorkoutsView()) {
+                    WeeklyBarChart(
+                        title: "Actividades",
+                        points: activityPts,
+                        barColor: WH.Color.strainBlue,
+                        formatValue: { "\(Int($0.rounded()))" }
+                    )
+                }
+                .buttonStyle(.plain)
+            }
             let strainPts = WeeklyChartBuilder.last7Days(from: weekRows) { $0.strain }
             if strainPts.contains(where: { $0.value > 0 }) {
                 NavigationLink(destination: MetricDetailView(kind: .strain)) {
@@ -449,106 +527,92 @@ struct TodayView: View {
 
     /// Calificación del sueño (sesión) o eficiencia diaria; no mezclar con eficiencia 92% vs score 82%.
     private var sleepFraction: Double? {
-        if let e = metrics.lastNight?.efficiency, e > 0 { return e }
-        if let e = metrics.today?.efficiency, e > 0 { return e }
-        if let m = metrics.today?.totalSleepMin, m > 0 { return min(1, m / 480) }
+        if let e = nightSleep?.efficiency, e > 0 { return e }
+        if let e = dayMetric?.efficiency, e > 0 { return e }
+        if let m = dayMetric?.totalSleepMin, m > 0 { return min(1, m / 480) }
         return nil
     }
 
     private var stressMonitorPlaceholder: some View {
-        VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            HStack {
-                Text("MONITOR DE ESTRÉS")
-                    .font(WH.Font.cardTitle)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .tracking(1.2)
-                Spacer()
-                Text("Próximamente")
-                    .font(WH.Font.caption)
-                    .foregroundStyle(WH.Color.textSecondary)
-            }
-            RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous)
-                .fill(WH.Color.surface)
-                .frame(height: 88)
-                .overlay {
-                    HStack(spacing: WH.Spacing.md) {
-                        Image(systemName: "waveform.path.ecg")
-                            .font(.system(size: 28, weight: .light))
-                            .foregroundStyle(WH.Color.stressLow.opacity(0.6))
-                        Text("Requiere pipeline de HRV continuo — fase posterior")
-                            .font(WH.Font.caption)
-                            .foregroundStyle(WH.Color.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(WH.Spacing.md)
-                }
-            CalibrationBanner(
-                completedNights: min(sleepNights, 4),
-                requiredNights: 4,
-                title: "Calibrando el monitor de estrés",
-                footnote: "Usa OpenWhoop 4 noches para desbloquear el monitor de estrés"
-            )
-            .opacity(sleepNights < 4 ? 1 : 0.45)
-        }
+        StressMonitorCard(
+            completedNights: sleepNights,
+            sleepStartTs: nightSleep?.startTs,
+            sleepEndTs: nightSleep?.endTs
+        )
     }
 
-    /// Up/down/flat vs 30-day baseline. `tolerance` is the dead-band (in the metric's units)
-    /// under which the value counts as unchanged. Returns nil when either side is missing.
-    private func trend(_ value: Double?, vs baseline: Double?, tolerance: Double) -> DashboardRow.Trend? {
-        guard let value, let baseline else { return nil }
-        if value > baseline + tolerance { return .up }
-        if value < baseline - tolerance { return .down }
+    /// Up/down/flat vs ayer. Returns nil when either side is missing.
+    private func trend(_ value: Double?, vs comparison: Double?, tolerance: Double) -> DashboardRow.Trend? {
+        guard let value, let comparison else { return nil }
+        if value > comparison + tolerance { return .up }
+        if value < comparison - tolerance { return .down }
         return .flat
     }
 
     private var recoveryRowEmbedded: some View {
-        let r = metrics.today?.recovery
+        let r = recoveryDisplay?.fraction ?? dayMetric?.recovery
+        let provisional = recoveryDisplay?.provisional ?? false
+        let y = yesterdayMetric?.recovery
         return DashboardRow(
             icon: "bolt.heart", label: "Recuperación",
             value: r.map { "\(Int(($0 * 100).rounded()))" } ?? "—",
             unit: r != nil ? "%" : nil,
-            baseline: BaselineCalculator.formatBaseline(baselines.recoveryPct, decimals: 0),
-            accentColor: r.map { WH.Color.recoveryColor(forPercent: $0 * 100) } ?? WH.Color.textSecondary,
+            baseline: provisional
+                ? "provisional · calibrando"
+                : TodayMetricHelpers.yesterdayComparison(
+                    current: r.map { $0 * 100 }, yesterday: y.map { $0 * 100 }, decimals: 0, unit: "%"),
+            accentColor: r.map {
+                provisional ? WH.Color.calibrationAccent : WH.Color.recoveryColor(forPercent: $0 * 100)
+            } ?? WH.Color.textSecondary,
             embedded: true,
-            trend: trend(r.map { $0 * 100 }, vs: baselines.recoveryPct, tolerance: 2))
+            trend: provisional ? nil : trend(r.map { $0 * 100 }, vs: y.map { $0 * 100 }, tolerance: 2))
     }
     private var strainRowEmbedded: some View {
-        let s = metrics.today?.strain
+        let s = dayMetric?.strain
+        let y = yesterdayMetric?.strain
         return DashboardRow(
             icon: "figure.run", label: "Esfuerzo diario",
             value: s.map { String(format: "%.1f", $0) } ?? "—",
             unit: s != nil ? "/ 21" : nil,
-            baseline: BaselineCalculator.formatBaseline(baselines.strain, decimals: 1),
+            baseline: TodayMetricHelpers.yesterdayComparison(current: s, yesterday: y, decimals: 1),
             accentColor: s != nil ? WH.Color.strainBlue : WH.Color.textSecondary,
             embedded: true,
-            trend: trend(s, vs: baselines.strain, tolerance: 0.5))
+            trend: trend(s, vs: y, tolerance: 0.5))
     }
     private var sleepRowEmbedded: some View { sleepRowBody(embedded: true) }
     private var hrvRowEmbedded: some View {
-        let hrv = metrics.today?.avgHrv ?? metrics.lastNight?.avgHrv
+        let hrv = TodayMetricHelpers.hrvMs(sleep: nightSleep, daily: dayMetric)
+        let yHrv = TodayMetricHelpers.hrvMs(
+            sleep: nil,
+            daily: yesterdayMetric
+        )
         return DashboardRow(
             icon: "waveform.path.ecg", label: "Variabilidad FC",
             value: hrv.map { String(format: "%.0f", $0) } ?? "—",
             unit: hrv != nil ? "ms" : nil,
-            baseline: BaselineCalculator.formatBaseline(baselines.hrv, decimals: 0),
+            baseline: TodayMetricHelpers.sleepWindowLabel(sleep: nightSleep)
+                ?? TodayMetricHelpers.yesterdayComparison(current: hrv, yesterday: yHrv, decimals: 0, unit: "ms"),
             accentColor: hrv != nil ? WH.Color.recoveryGreen : WH.Color.textSecondary,
             embedded: true,
-            trend: trend(hrv, vs: baselines.hrv, tolerance: 1))
+            trend: trend(hrv, vs: yHrv, tolerance: 1))
     }
     private var rhrRowEmbedded: some View {
-        let rhr = metrics.today?.restingHr ?? metrics.lastNight?.restingHr
+        let rhr = TodayMetricHelpers.restingHr(sleep: nightSleep, daily: dayMetric)
+        let yRhr = TodayMetricHelpers.restingHr(sleep: nil, daily: yesterdayMetric).map(Double.init)
         return DashboardRow(
             icon: "heart", label: "FC en reposo",
             value: rhr.map { "\($0)" } ?? "—",
             unit: rhr != nil ? "lpm" : nil,
-            baseline: BaselineCalculator.formatBaseline(baselines.rhr, decimals: 0),
+            baseline: TodayMetricHelpers.sleepWindowLabel(sleep: nightSleep)
+                ?? TodayMetricHelpers.yesterdayComparison(
+                    current: rhr.map(Double.init), yesterday: yRhr, decimals: 0, unit: "lpm"),
             accentColor: rhr != nil ? WH.Color.textPrimary : WH.Color.textSecondary,
             embedded: true,
-            trend: trend(rhr.map(Double.init), vs: baselines.rhr, tolerance: 1))
+            trend: trend(rhr.map(Double.init), vs: yRhr, tolerance: 1))
     }
 
     private var recoveryRow: some View {
-        let r = metrics.today?.recovery
+        let r = dayMetric?.recovery
         return DashboardRow(
             icon: "bolt.heart",
             label: "Recuperación",
@@ -558,7 +622,7 @@ struct TodayView: View {
     }
 
     private var strainRow: some View {
-        let s = metrics.today?.strain
+        let s = dayMetric?.strain
         return DashboardRow(
             icon: "figure.run",
             label: "Esfuerzo diario",
@@ -571,8 +635,8 @@ struct TodayView: View {
 
     private func sleepRowBody(embedded: Bool) -> some View {
         let sleepMin: Double? = {
-            if let m = metrics.today?.totalSleepMin, m > 0 { return m }
-            if let s = metrics.lastNight {
+            if let m = dayMetric?.totalSleepMin, m > 0 { return m }
+            if let s = nightSleep {
                 let d = Double(s.endTs - s.startTs) / 60
                 return d > 0 ? d : nil
             }
@@ -580,8 +644,8 @@ struct TodayView: View {
         }()
         let eff: Double? = {
             guard sleepMin != nil else { return nil }
-            if let e = metrics.today?.efficiency, e > 0 { return e }
-            if let e = metrics.lastNight?.efficiency, e > 0 { return e }
+            if let e = dayMetric?.efficiency, e > 0 { return e }
+            if let e = nightSleep?.efficiency, e > 0 { return e }
             return nil
         }()
         return DashboardRow(
@@ -594,7 +658,7 @@ struct TodayView: View {
     }
 
     private var hrvRow: some View {
-        let hrv = metrics.today?.avgHrv ?? metrics.lastNight?.avgHrv
+        let hrv = TodayMetricHelpers.hrvMs(sleep: nightSleep, daily: dayMetric)
         return DashboardRow(
             icon: "waveform.path.ecg",
             label: "Variabilidad FC",
@@ -604,7 +668,7 @@ struct TodayView: View {
     }
 
     private var rhrRow: some View {
-        let rhr = metrics.today?.restingHr ?? metrics.lastNight?.restingHr
+        let rhr = TodayMetricHelpers.restingHr(sleep: nightSleep, daily: dayMetric)
         return DashboardRow(
             icon: "heart",
             label: "FC en reposo",
@@ -626,7 +690,7 @@ struct TodayView: View {
                     Text("Sin métricas aún")
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .foregroundStyle(WH.Color.textPrimary)
-                    Text("Conecta el strap (Dispositivo), deja sincronizar y desliza hacia abajo para actualizar. La recuperación necesita ~4 noches.")
+                    Text("Toca el icono del strap arriba a la derecha, deja sincronizar y desliza hacia abajo. La recuperación necesita ~4 noches.")
                         .font(WH.Font.caption)
                         .foregroundStyle(WH.Color.textSecondary)
                         .multilineTextAlignment(.center)
@@ -643,60 +707,6 @@ struct TodayView: View {
             .padding(.vertical, WH.Spacing.xxl)
             .padding(.horizontal, WH.Spacing.md)
             Spacer()
-        }
-    }
-
-    // MARK: - Live strap status row (HR + battery when connected; caption when not)
-
-    /// Compact pill showing a single live reading (HR or battery).
-    private func liveChip(icon: String, label: String, color: Color) -> some View {
-        HStack(spacing: WH.Spacing.xs) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(color)
-            Text(label)
-                .font(.system(size: 13, weight: .semibold, design: .default))
-                .fontWidth(.condensed)
-                .foregroundStyle(WH.Color.textPrimary)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, WH.Spacing.sm)
-        .padding(.vertical, WH.Spacing.xs)
-        .background(WH.Color.surface2,
-                    in: Capsule())
-    }
-
-    /// Shows live HR + battery pills when connected; otherwise shows the connect caption.
-    private var strapNote: some View {
-        Group {
-            if live.state.connected, let hr = live.state.heartRate {
-                HStack(spacing: WH.Spacing.sm) {
-                    liveChip(icon: "heart.fill",
-                             label: "\(hr) BPM LIVE",
-                             color: WH.Color.recoveryRed)
-                    if let bat = live.state.batteryPct {
-                        let pct = Int(bat.rounded())
-                        let batColor: Color = pct > 30 ? WH.Color.recoveryGreen
-                                                       : WH.Color.recoveryYellow
-                        let batIcon = pct > 70 ? "battery.100" :
-                                      pct > 30 ? "battery.50"  : "battery.25"
-                        liveChip(icon: batIcon,
-                                 label: "\(pct)%",
-                                 color: batColor)
-                    }
-                    Spacer()
-                }
-            } else {
-                HStack(spacing: WH.Spacing.xs) {
-                    Image(systemName: "wave.3.right")
-                        .font(.system(size: 11, weight: .regular))
-                        .foregroundStyle(WH.Color.textSecondary.opacity(0.5))
-                    Text("FC y batería en vivo cuando el strap está conectado (Dispositivo)")
-                        .font(WH.Font.caption)
-                        .foregroundStyle(WH.Color.textSecondary.opacity(0.5))
-                        .lineLimit(2)
-                }
-            }
         }
     }
 

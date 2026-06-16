@@ -21,6 +21,7 @@ final class MetricsRepository: ObservableObject {
     @Published private(set) var lastNight: CachedSleepSession? // most-recent cached sleep session
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastError: String?
+    @Published private(set) var lastPRVNSyncError: String?
     @Published private(set) var lastRefreshedAt: Date?
     @Published private(set) var isDemoPreviewActive = false
 
@@ -114,16 +115,14 @@ final class MetricsRepository: ObservableObject {
 
         let now = Date()
         let cal = Calendar(identifier: .gregorian)
-        let fmt = DateFormatter()
-        fmt.calendar = cal
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        fmt.dateFormat = "yyyy-MM-dd"
 
-        // Fetch last 14 days of daily metrics; take the most-recent (last) row.
+        // Fetch last 14 days of daily metrics; take today's row (local calendar day key).
         if let start = cal.date(byAdding: .day, value: -14, to: now) {
-            let fromDay = fmt.string(from: start)
-            let toDay = fmt.string(from: now)
-            today = (try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay))?.last
+            let fromDay = Self.localDayString(for: start)
+            let toDay = Self.localDayString(for: now)
+            let rows = (try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay)) ?? []
+            let todayKey = Self.localDayString(for: now)
+            today = rows.last { $0.day == todayKey } ?? rows.last
         }
 
         // Fetch last 14 days of sleep sessions; take the most-recent (last) row.
@@ -151,6 +150,11 @@ final class MetricsRepository: ObservableObject {
         isRefreshing = false
         lastRefreshedAt = Date()
 
+        if !isDemoPreviewActive {
+            await maybeAutoSyncPRVNProgram()
+            await loadPRVNProgramFromServerIfNeeded()
+        }
+
         // Morning recovery notification: fire once per calendar day when recovery is available.
         if let metric = today, let recovery = metric.recovery {
             RecoveryNotifier.notify(recovery: recovery, forDay: metric.day)
@@ -164,6 +168,65 @@ final class MetricsRepository: ObservableObject {
         await ensureOpen()
         guard let store else { return [] }
         return (try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay)) ?? []
+    }
+
+    /// Últimos N días calendario locales (incluye hoy), ordenados por día ascendente.
+    func dailyLastDays(_ count: Int, endingOn date: Date = Date(), calendar: Calendar = .current) async -> [DailyMetric] {
+        let anchor = calendar.startOfDay(for: date)
+        guard let from = calendar.date(byAdding: .day, value: -(count - 1), to: anchor) else { return [] }
+        return await daily(fromDay: Self.localDayString(for: from, calendar: calendar),
+                           toDay: Self.localDayString(for: anchor, calendar: calendar))
+    }
+
+    /// Single daily row for a UTC calendar day.
+    func dailyMetric(forDay day: String) async -> DailyMetric? {
+        await daily(fromDay: day, toDay: day).first
+    }
+
+    /// Sleep session whose `endTs` falls on `day` (UTC YYYY-MM-DD).
+    func sleepSession(endingOnDay day: String) async -> CachedSleepSession? {
+        await ensureOpen()
+        guard let store else { return nil }
+        guard let bounds = Self.epochBounds(forDay: day) else { return nil }
+        let windowStart = bounds.start - 86_400
+        let windowEnd   = bounds.end + 86_400
+        let sessions = (try? await store.sleepSessions(deviceId: deviceId,
+                                                       from: windowStart,
+                                                       to: windowEnd,
+                                                       limit: 30)) ?? []
+        return sessions.last { Self.dayString(fromEpoch: $0.endTs) == day }
+    }
+
+    /// Local calendar `yyyy-MM-dd` for metric lookups and weekly charts (matches server UTC day labels for CET users).
+    nonisolated static func localDayString(for date: Date, calendar: Calendar = .current) -> String {
+        let fmt = DateFormatter()
+        fmt.calendar = calendar
+        fmt.timeZone = calendar.timeZone
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: calendar.startOfDay(for: date))
+    }
+
+    /// UTC `yyyy-MM-dd` for the instant of local start-of-day (legacy sleep/window keys).
+    nonisolated static func utcDayString(for date: Date, calendar: Calendar = .current) -> String {
+        dayString(fromEpoch: Int(calendar.startOfDay(for: date).timeIntervalSince1970))
+    }
+
+    nonisolated private static func dayString(fromEpoch epoch: Int) -> String {
+        let fmt = DateFormatter()
+        fmt.calendar = Calendar(identifier: .gregorian)
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
+    }
+
+    private static func epochBounds(forDay day: String) -> (start: Int, end: Int)? {
+        let fmt = DateFormatter()
+        fmt.calendar = Calendar(identifier: .gregorian)
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd"
+        guard let date = fmt.date(from: day) else { return nil }
+        let start = Int(date.timeIntervalSince1970)
+        return (start, start + 86_400 - 1)
     }
 
     /// Sleep sessions overlapping [from, to] (epoch seconds). Reads straight from cache.
@@ -185,6 +248,63 @@ final class MetricsRepository: ObservableObject {
     func putProfile(_ profile: Profile) async -> Bool {
         await ensureOpen()
         return await serverSync?.putProfile(profile) ?? false
+    }
+
+    /// Pull PRVN week from SugarWOD via server credentials. Returns false when unconfigured or on error.
+    func syncPRVNProgram(weekStart: Date? = nil) async -> Bool {
+        await ensureOpen()
+        guard let serverSync else {
+            lastPRVNSyncError = "Servidor no configurado. Revisa WHOOP_BASE_URL y WHOOP_API_KEY."
+            return false
+        }
+        let weekKey: String?
+        if let weekStart {
+            let monday = PRVNProgramStore.monday(containing: weekStart)
+            let fmt = DateFormatter()
+            fmt.calendar = Calendar.current
+            fmt.timeZone = TimeZone(identifier: "UTC")
+            fmt.dateFormat = "yyyyMMdd"
+            weekKey = fmt.string(from: monday)
+        } else {
+            weekKey = nil
+        }
+        let result = await serverSync.syncPRVNProgram(weekYYYYMMDD: weekKey)
+        if let payload = result.payload {
+            lastPRVNSyncError = nil
+            PRVNProgramStore.shared.importFromServer(pasteText: payload.pasteText, weekStartISO: payload.weekStart)
+            return true
+        }
+        lastPRVNSyncError = result.errorMessage
+            ?? "No se pudo sincronizar PRVN. Revisa credenciales SugarWOD en el servidor."
+        return false
+    }
+
+    /// Domingo: sincroniza la semana que empieza el lunes siguiente (una vez por semana).
+    func syncPRVNProgramIfSunday() async {
+        await ensureOpen()
+        await maybeAutoSyncPRVNProgram()
+        await loadPRVNProgramFromServerIfNeeded()
+    }
+
+    /// Carga la semana cacheada en el servidor si local está vacía o es otra semana.
+    func loadPRVNProgramFromServerIfNeeded() async {
+        await ensureOpen()
+        guard let serverSync else { return }
+        let todayMondayKey = PRVNProgramStore.dayKey(
+            for: PRVNProgramStore.monday(containing: Date())
+        )
+        let needsLoad = PRVNProgramStore.shared.week == nil
+            || PRVNProgramStore.shared.week?.weekStart != todayMondayKey
+        guard needsLoad else { return }
+        guard let payload = await serverSync.fetchPRVNProgram() else { return }
+        PRVNProgramStore.shared.importFromServer(pasteText: payload.pasteText, weekStartISO: payload.weekStart)
+    }
+
+    private func maybeAutoSyncPRVNProgram() async {
+        guard isServerConfigured, PRVNAutoSync.shouldRunAutoSync() else { return }
+        let monday = PRVNAutoSync.weekMondayToSync()
+        guard await syncPRVNProgram(weekStart: monday) else { return }
+        PRVNAutoSync.markSynced(weekMonday: monday)
     }
 
     // MARK: - Sleep tab reads (M2)
@@ -250,6 +370,9 @@ final class MetricsRepository: ObservableObject {
     /// Returns [] on any network error or when unconfigured.
     func hrSeries(fromEpoch: Int, toEpoch: Int, maxPoints: Int) async -> [TrendPoint] {
         await ensureOpen()
+        if isDemoPreviewActive {
+            return DemoDataLoader.demoHrSeries(fromEpoch: fromEpoch, toEpoch: toEpoch, maxPoints: maxPoints)
+        }
         guard let serverSync else { return [] }
         let raw = await serverSync.getHRSeries(fromEpoch: fromEpoch, toEpoch: toEpoch, maxPoints: maxPoints)
         return raw.map { pair in
@@ -312,7 +435,7 @@ final class MetricsRepository: ObservableObject {
 
     // MARK: - Workouts (M5)
 
-    /// Fetches auto-detected workout bouts from the server for the given date range.
+    /// Fetches auto-detected activities from the server for the given date range.
     /// Calls ensureOpen() to initialise the store/sync stack, then delegates to ServerSync.
     /// Returns [] when unconfigured (no API key), offline, or on parse error — never throws.
     func workouts(from: String, to: String) async -> [Workout] {
@@ -321,6 +444,43 @@ final class MetricsRepository: ObservableObject {
             return DemoDataLoader.demoWorkouts(deviceId: deviceId)
         }
         return await serverSync?.getWorkouts(from: from, to: to) ?? []
+    }
+
+    /// Añade subidas de FC detectadas en el cliente para un día concreto.
+    func supplementHRElevations(in workouts: [Workout], for day: Date, restingHr: Int?) async -> [Workout] {
+        await ensureOpen()
+        if isDemoPreviewActive { return workouts }
+
+        let cal = Calendar.current
+        let startOfDay = cal.startOfDay(for: day)
+        let startTs = Int(startOfDay.timeIntervalSince1970)
+        let endTs: Int
+        if cal.isDateInToday(day) {
+            endTs = Int(Date().timeIntervalSince1970)
+        } else if let next = cal.date(byAdding: .day, value: 1, to: startOfDay) {
+            endTs = Int(next.timeIntervalSince1970)
+        } else {
+            return workouts
+        }
+        guard endTs > startTs else { return workouts }
+
+        let hr = await hrSeries(fromEpoch: startTs, toEpoch: endTs, maxPoints: 14_400)
+        let deduped = WorkoutDeduper.dedupe(workouts)
+        let sustained = HRElevationDetector.detect(points: hr, restingHr: restingHr, deviceId: deviceId)
+        let peaks = HRElevationDetector.detectPeaks(
+            points: hr,
+            restingHr: restingHr,
+            deviceId: deviceId,
+            existing: deduped + sustained
+        )
+        let morning = HRElevationDetector.detectMorningWake(
+            points: hr,
+            for: day,
+            restingHr: restingHr,
+            deviceId: deviceId,
+            existing: deduped + sustained + peaks
+        )
+        return HRElevationDetector.merge(into: deduped, supplements: sustained + peaks + morning)
     }
 
     // MARK: - Workout calorie backfill (M7)

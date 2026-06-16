@@ -115,7 +115,7 @@ enum WeeklyChartBuilder {
                           calendar: Calendar = .current) -> [WeeklyBarPoint] {
         let fmt = DateFormatter()
         fmt.calendar = calendar
-        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.timeZone = calendar.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
 
         let weekdayFmt = DateFormatter()
@@ -128,7 +128,7 @@ enum WeeklyChartBuilder {
 
         return (0..<7).compactMap { offset -> WeeklyBarPoint? in
             guard let day = calendar.date(byAdding: .day, value: -(6 - offset), to: today) else { return nil }
-            let key = fmt.string(from: day)
+            let key = MetricsRepository.localDayString(for: day, calendar: calendar)
             let wd = weekdayFmt.string(from: day).lowercased().prefix(3)
             let dom = calendar.component(.day, from: day)
             let v = byDay[key].flatMap { value($0) } ?? 0

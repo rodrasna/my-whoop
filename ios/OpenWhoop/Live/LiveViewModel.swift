@@ -31,6 +31,15 @@ public final class LiveViewModel: ObservableObject {
             .compactMap { $0 }
             .sink { _ in SyncNudge.reschedule() }
             .store(in: &cancellables)
+        ble.onStrapReady = { [weak self] in
+            Task { @MainActor in self?.restoreStrapAlarmIfNeeded() }
+        }
+        state.$bonded
+            .filter { $0 }
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.restoreStrapAlarmIfNeeded() }
+            }
+            .store(in: &cancellables)
     }
 
     public func connect()  { ble.connect() }
@@ -61,16 +70,43 @@ public final class LiveViewModel: ObservableObject {
     // BLEManager reference. SmartAlarmController.schedule() still receives the BLEManager
     // directly (it holds it weakly); we hand it ours via armStrapAlarm(at:).
 
-    /// Arm the strap's firmware alarm for `date`. Also returns the BLEManager so
-    /// SmartAlarmController can hold a weak reference to the shared instance.
+    /// Arm the strap's firmware alarm for `date`.
     @discardableResult
-    public func armStrapAlarm(at date: Date) -> BLEManager {
-        ble.armStrapAlarm(at: date)
-        return ble
+    public func armStrapAlarm(at date: Date, smartWake: Bool = false, leadMinutes: Int = 20) -> Bool {
+        guard ble.armStrapAlarm(at: date) else { return false }
+        if smartWake {
+            SmartAlarmController.shared.schedule(wakeBy: date, leadMinutes: leadMinutes, ble: ble)
+        } else {
+            SmartAlarmController.shared.cancel()
+        }
+        return true
     }
 
+    /// Whether the strap accepted an arm request (connected + handshake done).
+    public var canArmStrapAlarm: Bool { ble.isStrapReadyForCommands }
+
     /// Disarm the currently-armed firmware alarm.
-    public func disableStrapAlarm() { ble.disableStrapAlarm() }
+    @discardableResult
+    public func disableStrapAlarm() -> Bool { ble.disableStrapAlarm() }
+
+    /// Re-program the firmware alarm after connect if UserDefaults still has one enabled.
+    public func restoreStrapAlarmIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: AlarmKeys.enabled) else { return }
+        let armed = defaults.double(forKey: AlarmKeys.armedEpoch)
+        guard armed > 0 else { return }
+        let fireDate = Date(timeIntervalSince1970: armed)
+        guard fireDate > Date().addingTimeInterval(5) else { return }
+        guard ble.armStrapAlarm(at: fireDate) else { return }
+        if defaults.bool(forKey: AlarmKeys.smartWakeEnabled) {
+            let lead = defaults.integer(forKey: AlarmKeys.smartWakeLeadMin)
+            SmartAlarmController.shared.schedule(
+                wakeBy: fireDate,
+                leadMinutes: max(5, lead),
+                ble: ble
+            )
+        }
+    }
 
     /// Request the current alarm time from the strap.
     public func getStrapAlarm() { ble.getStrapAlarm() }

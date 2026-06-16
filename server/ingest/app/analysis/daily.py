@@ -39,13 +39,9 @@ resp). We derive it from the trailing ``_BASELINE_DAYS`` of already-computed
 robust Winsorized-EWMA baseline with:
   - 14-night half-life (EWMA center) with outlier rejection and Winsorization.
   - EWMA-of-abs-deviation spread (robust σ), per-metric floored.
-  - Cold-start gate: if the HRV baseline is not yet trusted (< MIN_NIGHTS_SEED
-    valid nights), ``recovery_score`` returns ``None`` and the metric column is
-    left null for that day.
-
-On the very first run (no history) the baselines are in "calibrating" status and
-``recovery_score`` returns None — meaning the day's recovery column is null until
-enough nights accumulate.  This is the honest behavior (vs. anchoring at 60).
+  - Cold-start: if the HRV baseline is not yet trusted (< MIN_NIGHTS_SEED
+    valid nights), ``recovery_score`` uses population anchors and still returns
+    a provisional %.  Recompute past days after accumulating 4+ nights.
 
 Resp note: resp has no dedicated ``daily_metrics`` column.  We carry nightly resp
 values in a rolling list built from the session-level resp mean (also computed here).
@@ -460,13 +456,20 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         resting_hr=float(resting_hr) if resting_hr is not None else None,
         max_hr=eff_max_hr,
         profile=device_profile)
+    elevations = _exercise.detect_hr_elevations(
+        day_streams,
+        resting_hr=float(resting_hr) if resting_hr is not None else None,
+        max_hr=eff_max_hr,
+        existing_sessions=exercises,
+        profile=device_profile)
+    all_exercises = _exercise.dedupe_overlapping_sessions(exercises + elevations)
 
     # ── Calibrated nightly signals (APPROXIMATE; over the sleep window) ───────
     signals = _nightly_signals(conn, device_id, day, streams, night_start, night_end)
 
     # ── Persist (idempotent upserts) ─────────────────────────────────────────
     night_dicts = [_session_to_dict(s) for s in night_sessions]
-    ex_dicts = [_exercise_to_dict(e) for e in exercises]
+    ex_dicts = [_exercise_to_dict(e) for e in all_exercises]
     metrics = {
         "total_sleep_min": sleep_summary["total_sleep_min"],
         "efficiency": sleep_summary["efficiency"],

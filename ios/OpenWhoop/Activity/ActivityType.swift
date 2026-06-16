@@ -5,7 +5,7 @@ import SwiftUI
 // porque es la actividad principal del usuario. La clasificación real es: etiqueta local
 // del usuario  >  `kind` del servidor (autodetectado)  >  sin clasificar.
 
-enum ActivityType: String, CaseIterable, Identifiable {
+enum ActivityType: String, CaseIterable, Identifiable, Codable {
     case crossfit
     case running
     case cycling
@@ -36,10 +36,10 @@ enum ActivityType: String, CaseIterable, Identifiable {
         }
     }
 
-    /// SF Symbol disponible en iOS 16.
+    /// SF Symbol para CrossFit (figure.gymnastics desde iOS 16; handstand no existe en el catálogo del sistema).
     var symbol: String {
         switch self {
-        case .crossfit:  return "figure.strengthtraining.functional"
+        case .crossfit:  return "figure.gymnastics"
         case .running:   return "figure.run"
         case .cycling:   return "bicycle"
         case .strength:  return "dumbbell.fill"
@@ -52,6 +52,9 @@ enum ActivityType: String, CaseIterable, Identifiable {
         case .other:     return "bolt.fill"
         }
     }
+
+    /// Tipos ligeros para actividades que no son entreno (caminata, etc.).
+    static let activityOnlyCases: [ActivityType] = [.walking, .yoga, .other]
 
     /// Mapea el `kind` (texto libre autodetectado en el servidor) a un tipo conocido.
     /// Tolerante: compara en minúsculas y por substring.

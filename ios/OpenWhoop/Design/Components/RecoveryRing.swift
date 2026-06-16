@@ -1,76 +1,100 @@
 import SwiftUI
 
-// MARK: - RecoveryRing
-// Circular progress ring showing a recovery percentage.
-// Ring stroke is colored by the recovery band (green/yellow/red).
-// The integer % is rendered large+bold in the center with a caption label below.
+// MARK: - ProgressRing
+// Shared arc renderer for all rings — track, soft glow, colored stroke (official WHOOP feel).
 
-struct RecoveryRing: View {
+struct ProgressRing: View {
+    var progress: Double          // 0…1
+    var color: Color
+    var diameter: CGFloat
+    var strokeWidth: CGFloat? = nil
+    var showGlow: Bool = true
+    var animated: Bool = true
 
-    /// Recovery percentage 0–100
-    var percent: Double
-    var size: CGFloat = 180
-    var strokeWidth: CGFloat = 14
-
-    // Clamp to valid range
-    private var clamped: Double { min(100, max(0, percent)) }
-    private var progress: Double { clamped / 100 }
-    private var bandColor: Color { WH.Color.recoveryColor(forPercent: clamped) }
+    private var clamped: Double { min(1, max(0, progress)) }
+    private var lineWidth: CGFloat { strokeWidth ?? WH.Ring.headerStroke(diameter: diameter) }
 
     var body: some View {
         ZStack {
-            // --- Track (faint ring) ---
             Circle()
-                .stroke(WH.Color.ringTrack, lineWidth: strokeWidth)
+                .stroke(WH.Color.ringTrackOuter, lineWidth: lineWidth + 2)
 
-            // --- Filled arc ---
             Circle()
-                .trim(from: 0, to: progress)
-                .stroke(
-                    bandColor,
-                    style: StrokeStyle(
-                        lineWidth: strokeWidth,
-                        lineCap: .round
-                    )
-                )
-                .rotationEffect(.degrees(-90))
-                .animation(.easeInOut(duration: 0.6), value: progress)
+                .stroke(WH.Color.ringTrack, lineWidth: lineWidth)
 
-            // --- Glow effect (subtle) ---
-            Circle()
-                .trim(from: 0, to: progress)
-                .stroke(
-                    bandColor.opacity(0.25),
-                    style: StrokeStyle(lineWidth: strokeWidth + 8, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
-                .blur(radius: 6)
-                .animation(.easeInOut(duration: 0.6), value: progress)
+            if showGlow, clamped > 0.01 {
+                Circle()
+                    .trim(from: 0, to: clamped)
+                    .stroke(color.opacity(WH.Ring.glowOpacity),
+                            style: StrokeStyle(lineWidth: lineWidth + 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .blur(radius: WH.Ring.glowBlur)
+                    .animation(animated ? .easeInOut(duration: 0.55) : nil, value: clamped)
+            }
 
-            // --- Center content ---
-            VStack(spacing: 2) {
-                Text("\(Int(clamped.rounded()))")
-                    .font(WH.Font.metricHero(size: size * 0.32))
-                    .foregroundStyle(WH.Color.textPrimary)
-                    .monospacedDigit()
-
-                Text("RECOVERY")
-                    .font(WH.Font.cardTitle)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .tracking(1.5)
+            if clamped > 0 {
+                Circle()
+                    .trim(from: 0, to: clamped)
+                    .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(animated ? .easeInOut(duration: 0.55) : nil, value: clamped)
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: diameter, height: diameter)
+    }
+}
+
+// MARK: - RecoveryRing
+// Circular progress ring showing a recovery percentage.
+
+struct RecoveryRing: View {
+
+    var percent: Double
+    var size: CGFloat = 180
+    var strokeWidth: CGFloat? = nil
+    /// True during the first nights (<4): score uses population baseline, ring is dimmed.
+    var provisional: Bool = false
+
+    private var clamped: Double { min(100, max(0, percent)) }
+    private var progress: Double { clamped / 100 }
+    private var bandColor: Color {
+        provisional ? WH.Color.calibrationAccent.opacity(0.85) : WH.Color.recoveryColor(forPercent: clamped)
+    }
+    private var lineWidth: CGFloat { strokeWidth ?? WH.Ring.heroStroke(diameter: size) }
+
+    var body: some View {
+        VStack(spacing: WH.Spacing.md) {
+            ZStack {
+                ProgressRing(progress: progress,
+                             color: bandColor,
+                             diameter: size,
+                             strokeWidth: lineWidth,
+                             showGlow: !provisional)
+                Text("\(Int(clamped.rounded()))%")
+                    .font(WH.Font.ringValue(size: size * 0.30, weight: .black))
+                    .foregroundStyle(provisional ? WH.Color.textSecondary : WH.Color.textPrimary)
+                    .monospacedDigit()
+                    .frame(width: size * 0.62)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+
+            Text(provisional ? "RECUPERACIÓN · CALIBRANDO" : "RECUPERACIÓN")
+                .font(WH.Font.ringLabel())
+                .foregroundStyle(provisional ? WH.Color.calibrationAccent : WH.Color.textSecondary)
+                .tracking(provisional ? 0.6 : 1.2)
+                .multilineTextAlignment(.center)
+                .padding(.top, WH.Spacing.xs)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
 // MARK: - MiniRing
-// Small outline progress ring with a value in the center and a caption label below.
-// Used by TriRingHeader to mirror the official app's Sleep / Recovery / Strain header.
+// Small outline progress ring (legacy helper; prefer TriRingHeader).
 
 struct MiniRing: View {
 
-    /// Fill fraction 0…1 (nil → empty "calibrating" ring with an em-dash).
     var progress: Double?
     var color: Color
     var centerText: String
@@ -81,53 +105,44 @@ struct MiniRing: View {
     private var clamped: Double { min(1, max(0, progress ?? 0)) }
 
     var body: some View {
-        VStack(spacing: WH.Spacing.xs) {
+        VStack(spacing: WH.Spacing.sm) {
             ZStack {
-                Circle()
-                    .stroke(WH.Color.ringTrack, lineWidth: strokeWidth)
-
-                if progress != nil {
-                    Circle()
-                        .trim(from: 0, to: clamped)
-                        .stroke(color, style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(.easeInOut(duration: 0.6), value: clamped)
-                }
-
+                ProgressRing(progress: progress ?? 0,
+                             color: color,
+                             diameter: size,
+                             strokeWidth: strokeWidth,
+                             showGlow: progress != nil)
                 Text(centerText)
-                    .font(.system(size: size * 0.28, weight: .bold, design: .default))
-                    .fontWidth(.condensed)
+                    .font(WH.Font.ringValue(size: size * 0.28, weight: .bold))
                     .foregroundStyle(progress == nil ? WH.Color.textSecondary : WH.Color.textPrimary)
                     .monospacedDigit()
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
             }
-            .frame(width: size, height: size)
 
             Text(label.uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .font(WH.Font.ringLabel(size: 9))
                 .foregroundStyle(WH.Color.textSecondary)
-                .tracking(1.0)
+                .tracking(0.8)
         }
     }
 }
 
 // MARK: - TriRingHeader
-// The official app's top header: three small rings — Sleep, Recovery, Strain.
-// Each value is optional; a nil value renders a faint "calibrating" ring.
+// Three header rings — Sleep, Recovery, Strain.
 
 struct TriRingHeader: View {
 
-    /// Sleep performance 0…1 (calificación del sueño).
     var sleepFraction: Double?
-    /// Recovery 0…1.
     var recoveryFraction: Double?
-    /// Day strain 0…21.
+    var recoveryProvisional: Bool = false
     var strain: Double?
-    var ringSize: CGFloat = 96
+    var ringSize: CGFloat = 100
     var onSleepTap: (() -> Void)? = nil
     var onRecoveryTap: (() -> Void)? = nil
     var onStrainTap: (() -> Void)? = nil
+
+    private var stroke: CGFloat { WH.Ring.headerStroke(diameter: ringSize) }
 
     var body: some View {
         HStack(alignment: .top, spacing: WH.Spacing.sm) {
@@ -140,48 +155,49 @@ struct TriRingHeader: View {
 
             tappableRing(onTap: onRecoveryTap) {
                 ringItem(progress: recoveryFraction,
-                         color: recoveryFraction.map { WH.Color.recoveryColor(forPercent: $0 * 100) } ?? WH.Color.textSecondary,
+                         color: recoveryRingColor,
                          value: recoveryFraction.map { "\(Int(($0 * 100).rounded()))%" },
-                         label: "Recuperación")
+                         label: recoveryProvisional ? "Recup. · cal." : "Recuperación",
+                         dimmed: recoveryProvisional)
             }
 
             tappableRing(onTap: onStrainTap) {
                 ringItem(progress: strain.map { $0 / 21 },
                          color: WH.Color.strainBlue,
-                         value: strain.map { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") },
+                         value: strain.map { "\(WH.Ring.strainPercent($0))%" },
                          label: "Esfuerzo")
             }
         }
     }
 
-    /// One large ring (official-style): bold value centered inside the arc, uppercase
-    /// label below. Stacked vertically so each ring reads as a prominent hero like the
-    /// official app's top header, not a tiny inline chip.
-    private func ringItem(progress: Double?, color: Color, value: String?, label: String) -> some View {
-        VStack(spacing: WH.Spacing.xs) {
+    private var recoveryRingColor: Color {
+        guard let r = recoveryFraction else { return WH.Color.textSecondary }
+        if recoveryProvisional { return WH.Color.calibrationAccent }
+        return WH.Color.recoveryColor(forPercent: r * 100)
+    }
+
+    private func ringItem(progress: Double?, color: Color, value: String?, label: String,
+                          dimmed: Bool = false) -> some View {
+        VStack(spacing: WH.Spacing.md) {
             ZStack {
-                Circle()
-                    .stroke(WH.Color.ringTrack, lineWidth: 7)
-                if let p = progress {
-                    Circle()
-                        .trim(from: 0, to: min(1, max(0, p)))
-                        .stroke(color, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(.easeInOut(duration: 0.6), value: p)
-                }
+                ProgressRing(progress: progress ?? 0,
+                             color: color,
+                             diameter: ringSize,
+                             strokeWidth: stroke,
+                             showGlow: progress != nil && !dimmed)
                 Text(value ?? "—")
-                    .font(.system(size: ringSize * 0.30, weight: .heavy, design: .default))
-                    .fontWidth(.condensed)
-                    .foregroundStyle(progress == nil ? WH.Color.textSecondary : WH.Color.textPrimary)
+                    .font(WH.Font.ringValue(size: ringSize * 0.27, weight: .heavy))
+                    .foregroundStyle(progress == nil ? WH.Color.textSecondary
+                                     : (dimmed ? WH.Color.textSecondary : WH.Color.textPrimary))
                     .monospacedDigit()
                     .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                    .padding(.horizontal, 4)
+                    .minimumScaleFactor(0.45)
+                    .padding(.horizontal, 8)
             }
-            .frame(width: ringSize, height: ringSize)
+            .opacity(dimmed ? 0.88 : 1)
 
             Text(label.uppercased())
-                .font(.system(size: 11, weight: .bold))
+                .font(WH.Font.ringLabel())
                 .foregroundStyle(WH.Color.textSecondary)
                 .tracking(0.5)
                 .lineLimit(1)
@@ -202,72 +218,95 @@ struct TriRingHeader: View {
 }
 
 // MARK: - StrainRing
-// Anillo hero de esfuerzo diario (0–21).
 
 struct StrainRing: View {
     var strain: Double
-    var size: CGFloat = 220
-    var strokeWidth: CGFloat = 16
+    var size: CGFloat = 200
+    var strokeWidth: CGFloat? = nil
+    /// When true, shows raw strain (e.g. tri-ring header). Detail screens use percentage.
+    var showRawStrain: Bool = false
 
     private var clamped: Double { min(21, max(0, strain)) }
     private var progress: Double { clamped / 21 }
+    private var lineWidth: CGFloat { strokeWidth ?? WH.Ring.heroStroke(diameter: size) }
+    private var pct: Int { WH.Ring.strainPercent(clamped) }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(WH.Color.ringTrack, lineWidth: strokeWidth)
-            Circle()
-                .trim(from: 0, to: progress)
-                .stroke(WH.Color.strainBlue,
-                        style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            VStack(spacing: 4) {
-                Text(String(format: "%.1f", clamped).replacingOccurrences(of: ".", with: ","))
-                    .font(WH.Font.metricHero(size: size * 0.26))
-                    .foregroundStyle(WH.Color.textPrimary)
-                    .monospacedDigit()
-                Text("ESFUERZO")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .tracking(1.2)
+        VStack(spacing: WH.Spacing.md) {
+            ZStack {
+                ProgressRing(progress: progress,
+                             color: WH.Color.strainBlue,
+                             diameter: size,
+                             strokeWidth: lineWidth)
+                if showRawStrain {
+                    Text(String(format: "%.1f", clamped).replacingOccurrences(of: ".", with: ","))
+                        .font(WH.Font.ringValue(size: size * 0.30, weight: .black))
+                        .foregroundStyle(WH.Color.textPrimary)
+                        .monospacedDigit()
+                        .frame(width: size * 0.62)
+                        .multilineTextAlignment(.center)
+                } else {
+                    VStack(spacing: 2) {
+                        Text("\(pct)%")
+                            .font(WH.Font.ringValue(size: size * 0.30, weight: .black))
+                            .foregroundStyle(WH.Color.textPrimary)
+                            .monospacedDigit()
+                        Text(String(format: "%.1f / 21", clamped).replacingOccurrences(of: ".", with: ","))
+                            .font(.system(size: max(11, size * 0.075), weight: .semibold, design: .default))
+                            .fontWidth(.condensed)
+                            .foregroundStyle(WH.Color.textSecondary)
+                            .monospacedDigit()
+                    }
+                    .frame(width: size * 0.62)
+                    .multilineTextAlignment(.center)
+                }
             }
+            .frame(maxWidth: .infinity)
+
+            Text("ESFUERZO")
+                .font(WH.Font.ringLabel())
+                .foregroundStyle(WH.Color.textSecondary)
+                .tracking(1.0)
+                .padding(.top, WH.Spacing.xs)
         }
-        .frame(width: size, height: size)
+        .frame(maxWidth: .infinity)
     }
 }
 
 // MARK: - SleepPerformanceRing
-// Anillo hero de calificación de sueño (pantalla detalle / cabecera Sueño).
 
 struct SleepPerformanceRing: View {
     var scorePercent: Double
-    var size: CGFloat = 220
-    var strokeWidth: CGFloat = 16
+    var size: CGFloat = 200
+    var strokeWidth: CGFloat? = nil
 
     private var clamped: Double { min(100, max(0, scorePercent)) }
+    private var lineWidth: CGFloat { strokeWidth ?? WH.Ring.heroStroke(diameter: size) }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(WH.Color.ringTrack, lineWidth: strokeWidth)
-            Circle()
-                .trim(from: 0, to: clamped / 100)
-                .stroke(WH.Color.sleepBlue,
-                        style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            VStack(spacing: 4) {
+        VStack(spacing: WH.Spacing.md) {
+            ZStack {
+                ProgressRing(progress: clamped / 100,
+                             color: WH.Color.sleepBlue,
+                             diameter: size,
+                             strokeWidth: lineWidth)
                 Text("\(Int(clamped.rounded()))%")
-                    .font(WH.Font.metricHero(size: size * 0.26))
+                    .font(WH.Font.ringValue(size: size * 0.30, weight: .black))
                     .foregroundStyle(WH.Color.textPrimary)
                     .monospacedDigit()
-                Text("RENDIMIENTO DEL SUEÑO")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .tracking(1.2)
+                    .frame(width: size * 0.62)
                     .multilineTextAlignment(.center)
             }
+            .frame(maxWidth: .infinity)
+
+            Text("RENDIMIENTO DEL SUEÑO")
+                .font(WH.Font.ringLabel())
+                .foregroundStyle(WH.Color.textSecondary)
+                .tracking(0.8)
+                .multilineTextAlignment(.center)
+                .padding(.top, WH.Spacing.xs)
         }
-        .frame(width: size, height: size)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -275,6 +314,7 @@ struct SleepPerformanceRing: View {
 
 #Preview("Tri-ring header") {
     VStack(spacing: WH.Spacing.xl) {
+        TriRingHeader(sleepFraction: 0.95, recoveryFraction: 0.20, strain: 2.8)
         TriRingHeader(sleepFraction: 0.73, recoveryFraction: 0.51, strain: 12.4)
         TriRingHeader(sleepFraction: nil, recoveryFraction: nil, strain: nil)
     }

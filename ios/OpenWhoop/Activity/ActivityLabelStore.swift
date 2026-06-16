@@ -12,6 +12,9 @@ final class ActivityLabelStore: ObservableObject {
 
     private static let key = "com.openwhoop.activityLabels.v1"
     private static let samplesKey = "com.openwhoop.activitySamples.v1"
+    private static let dismissedKey = "com.openwhoop.dismissedBouts.v1"
+    private static let activityOnlyKey = "com.openwhoop.activityOnlyLabels.v1"
+    private static let sessionStylesKey = "com.openwhoop.crossfitSessionStyles.v1"
 
     /// Mínimo de muestras etiquetadas antes de empezar a sugerir (evita sugerir con poca evidencia).
     private static let minSamplesToSuggest = 4
@@ -20,8 +23,14 @@ final class ActivityLabelStore: ObservableObject {
     private static let maxAcceptDistance = 0.45
 
     @Published private(set) var labels: [String: ActivityType] = [:]
+    /// Bouts que el usuario marcó como actividad cotidiana (no entreno).
+    @Published private(set) var dismissed: Set<String> = []
+    /// Etiqueta opcional para actividades que no son entreno (caminata, otra…).
+    @Published private(set) var activityOnly: [String: ActivityType] = [:]
     /// Dataset de referencia: firma + etiqueta de cada entreno que el usuario ha clasificado.
     @Published private(set) var samples: [String: ActivitySample] = [:]
+    /// Subtipo CrossFit (clasificatorio, benchmark…) por entreno.
+    @Published private(set) var sessionStyles: [String: CrossFitSessionStyle] = [:]
 
     init() {
         if let raw = UserDefaults.standard.dictionary(forKey: Self.key) as? [String: String] {
@@ -31,6 +40,27 @@ final class ActivityLabelStore: ObservableObject {
            let decoded = try? JSONDecoder().decode([String: ActivitySample].self, from: data) {
             samples = decoded
         }
+        if let arr = UserDefaults.standard.array(forKey: Self.dismissedKey) as? [String] {
+            dismissed = Set(arr)
+        }
+        if let raw = UserDefaults.standard.dictionary(forKey: Self.activityOnlyKey) as? [String: String] {
+            activityOnly = raw.compactMapValues { ActivityType(rawValue: $0) }
+        }
+        if let raw = UserDefaults.standard.dictionary(forKey: Self.sessionStylesKey) as? [String: String] {
+            sessionStyles = raw.compactMapValues { CrossFitSessionStyle(rawValue: $0) }
+        }
+    }
+
+    func sessionStyle(for workout: Workout) -> CrossFitSessionStyle? {
+        sessionStyles[workout.id]
+    }
+
+    func displayTitle(for workout: Workout) -> String? {
+        guard let type = effectiveType(for: workout) else { return nil }
+        if type == .crossfit, let style = sessionStyles[workout.id], style != .regular {
+            return "\(type.displayName) · \(style.displayName)"
+        }
+        return type.displayName
     }
 
     /// Etiqueta efectiva: etiqueta manual del usuario, si no la hay deriva del `kind` del servidor.
@@ -43,6 +73,41 @@ final class ActivityLabelStore: ObservableObject {
         labels[id]
     }
 
+    func isDismissed(_ id: String) -> Bool { dismissed.contains(id) }
+
+    func activityOnlyType(for workout: Workout) -> ActivityType? {
+        activityOnly[workout.id]
+    }
+
+    func isConfirmed(_ workout: Workout) -> Bool {
+        manualLabel(for: workout.id) != nil
+    }
+
+    /// Actividad cotidiana: visible en Actividad pero no cuenta como entreno.
+    func markAsActivityOnly(_ workout: Workout, type: ActivityType? = nil) {
+        dismissed.insert(workout.id)
+        labels.removeValue(forKey: workout.id)
+        samples.removeValue(forKey: workout.id)
+        if let type { activityOnly[workout.id] = type }
+        else { activityOnly.removeValue(forKey: workout.id) }
+        persist()
+    }
+
+    /// El usuario indica que este bout NO fue un entreno (p. ej. rutina matutina).
+    func dismissAsNotWorkout(_ workout: Workout) {
+        markAsActivityOnly(workout, type: nil)
+    }
+
+    func restoreAsWorkoutCandidate(_ workoutId: String) {
+        dismissed.remove(workoutId)
+        activityOnly.removeValue(forKey: workoutId)
+        persist()
+    }
+
+    func restoreDismissed(_ workoutId: String) {
+        restoreAsWorkoutCandidate(workoutId)
+    }
+
     /// Cuántas sesiones de referencia hay de un tipo concreto.
     func sampleCount(of type: ActivityType) -> Int {
         samples.values.filter { $0.label == type.rawValue }.count
@@ -53,9 +118,22 @@ final class ActivityLabelStore: ObservableObject {
         if let type {
             labels[workout.id] = type
             samples[workout.id] = ActivitySample.make(from: workout, label: type)
+            dismissed.remove(workout.id)
+            activityOnly.removeValue(forKey: workout.id)
+            if type != .crossfit { sessionStyles.removeValue(forKey: workout.id) }
         } else {
             labels.removeValue(forKey: workout.id)
             samples.removeValue(forKey: workout.id)
+            sessionStyles.removeValue(forKey: workout.id)
+        }
+        persist()
+    }
+
+    func setSessionStyle(_ style: CrossFitSessionStyle?, for workout: Workout) {
+        if let style, style != .regular {
+            sessionStyles[workout.id] = style
+        } else {
+            sessionStyles.removeValue(forKey: workout.id)
         }
         persist()
     }
@@ -100,8 +178,13 @@ final class ActivityLabelStore: ObservableObject {
     private func persist() {
         let raw = labels.mapValues { $0.rawValue }
         UserDefaults.standard.set(raw, forKey: Self.key)
+        UserDefaults.standard.set(Array(dismissed), forKey: Self.dismissedKey)
+        let activityRaw = activityOnly.mapValues { $0.rawValue }
+        UserDefaults.standard.set(activityRaw, forKey: Self.activityOnlyKey)
         if let data = try? JSONEncoder().encode(samples) {
             UserDefaults.standard.set(data, forKey: Self.samplesKey)
         }
+        let stylesRaw = sessionStyles.mapValues { $0.rawValue }
+        UserDefaults.standard.set(stylesRaw, forKey: Self.sessionStylesKey)
     }
 }

@@ -77,20 +77,50 @@ enum DemoDataLoader {
             let strain = strainByOffset[offset] ?? 0
             weekDaily.append(DailyMetric(
                 day: day,
-                totalSleepMin: offset == -1 ? 350 : nil,
-                efficiency: offset == -1 ? 0.88 : nil,
-                deepMin: nil, remMin: nil, lightMin: nil,
+                totalSleepMin: offset == -1 ? 350 : (offset >= -3 ? 340 : nil),
+                efficiency: offset == -1 ? 0.88 : (offset == -2 ? 0.85 : nil),
+                deepMin: offset >= -3 ? 105 : nil,
+                remMin: offset >= -3 ? 52 : nil,
+                lightMin: offset >= -3 ? 175 : nil,
                 disturbances: nil,
                 restingHr: offset >= -2 ? 63 : nil,
                 avgHrv: offset >= -2 ? 24 : nil,
                 recovery: offset == -1 ? 0.35 : (offset == -2 ? 0.42 : nil),
                 strain: strain > 0 ? strain : nil,
-                exerciseCount: 0
+                exerciseCount: 0,
+                spo2Pct: offset >= -4 ? 93.5 + Double(offset + 4) * 0.15 : nil,
+                skinTempDevC: offset >= -3 ? Double(offset + 3) * 0.08 : nil,
+                respRateBpm: offset >= -4 ? 14.0 + Double(-offset) * 0.1 : nil
             ))
         }
 
         weekDaily.sort { $0.day < $1.day }
-        return Payload(daily: weekDaily, sessions: [lastNight])
+
+        // 7 noches para gráfico horario + regularidad (leve variación en hora de acostarse).
+        var sessions: [CachedSleepSession] = []
+        for offset in -6...0 {
+            guard let dayDate = cal.date(byAdding: .day, value: offset, to: referenceDate) else { continue }
+            var startComps = cal.dateComponents([.year, .month, .day], from: dayDate)
+            let bedMin = 31 + (offset + 6) * 8 - (offset == 0 ? 0 : (offset % 3) * 12)
+            startComps.hour = 2; startComps.minute = max(5, min(55, bedMin))
+            var endComps = startComps
+            endComps.hour = 9; endComps.minute = 4
+            let sDate = cal.date(from: startComps) ?? dayDate
+            let eDate = cal.date(from: endComps) ?? dayDate
+            let sTs = Int(sDate.timeIntervalSince1970)
+            let eTs = Int(eDate.timeIntervalSince1970)
+            let eff = offset == 0 ? 0.82 : (0.78 + Double(offset + 6) * 0.01)
+            sessions.append(CachedSleepSession(
+                startTs: sTs, endTs: eTs,
+                efficiency: min(0.95, eff),
+                restingHr: 63 + (offset + 6) % 3,
+                avgHrv: 20 + Double(offset + 6),
+                stagesJSON: offset == 0 ? stagesJSON : "[]"
+            ))
+        }
+        sessions.sort { $0.startTs < $1.startTs }
+
+        return Payload(daily: weekDaily, sessions: sessions)
     }
 
     /// Entrenos de vista previa (solo simulador): bouts genéricos detectados, SIN `kind`.
@@ -106,9 +136,16 @@ enum DemoDataLoader {
         }
         let cfZones: [Int: Double] = [0: 4, 1: 9, 2: 18, 3: 24, 4: 28, 5: 17]
         let runZones: [Int: Double] = [0: 5, 1: 16, 2: 36, 3: 33, 4: 8, 5: 2]
+        // Rutina matutina: FC sube al despertar pero sin esfuerzo acumulado (falso positivo típico).
+        let morningZones: [Int: Double] = [0: 42, 1: 38, 2: 14, 3: 4, 4: 2, 5: 0]
+        let morningRoutine: [Workout] = (0...4).map { offset in
+            makeWorkout(deviceId: deviceId, start: at(-offset, hour: 7, minute: 5 + offset),
+                        durationMin: 12, kind: nil, avgHr: 98, peakHr: 190, strain: 2.1,
+                        zones: morningZones, kcal: 45, motionVar: 0.08, hrPeaks: 0.22)
+        }
         // CrossFit: movimiento bursty + muchos picos de FC; carrera: estable.
-        return [
-            makeWorkout(deviceId: deviceId, start: at(0, hour: 7, minute: 5),  durationMin: 52, kind: nil, avgHr: 148, peakHr: 182, strain: 12.4, zones: cfZones, kcal: 520, motionVar: 0.62, hrPeaks: 0.48),
+        return morningRoutine + [
+            makeWorkout(deviceId: deviceId, start: at(0, hour: 13, minute: 30), durationMin: 52, kind: nil, avgHr: 148, peakHr: 182, strain: 12.4, zones: cfZones, kcal: 520, motionVar: 0.62, hrPeaks: 0.48),
             makeWorkout(deviceId: deviceId, start: at(-2, hour: 19, minute: 30), durationMin: 47, kind: nil, avgHr: 152, peakHr: 186, strain: 13.1, zones: cfZones, kcal: 498, motionVar: 0.58, hrPeaks: 0.52),
             makeWorkout(deviceId: deviceId, start: at(-3, hour: 8, minute: 15),  durationMin: 34, kind: nil, avgHr: 139, peakHr: 168, strain: 8.6,  zones: runZones, kcal: 360, motionVar: 0.14, hrPeaks: 0.06),
             makeWorkout(deviceId: deviceId, start: at(-5, hour: 18, minute: 50), durationMin: 61, kind: nil, avgHr: 150, peakHr: 188, strain: 14.0, zones: cfZones, kcal: 612, motionVar: 0.66, hrPeaks: 0.50),
@@ -195,5 +232,35 @@ enum DemoDataLoader {
             return "[]"
         }
         return json
+    }
+
+    /// Serie sintética de FC para gráficos en vista previa (sin servidor).
+    static func demoHrSeries(fromEpoch: Int, toEpoch: Int, maxPoints: Int) -> [TrendPoint] {
+        guard toEpoch > fromEpoch, maxPoints > 1 else { return [] }
+        let span = toEpoch - fromEpoch
+        let step = max(30, span / maxPoints)
+        var points: [TrendPoint] = []
+        var ts = fromEpoch
+        while ts <= toEpoch {
+            let hour = Calendar.current.component(.hour, from: Date(timeIntervalSince1970: TimeInterval(ts)))
+            let minute = Calendar.current.component(.minute, from: Date(timeIntervalSince1970: TimeInterval(ts)))
+            // Línea base ~62–68 lpm; pico matutino ~7:00–7:15; esfuerzo tarde ~13:30–14:30.
+            var bpm = 64.0 + sin(Double(ts) / 900.0) * 4
+            if hour == 7 && minute >= 0 && minute <= 20 {
+                let spike = exp(-pow(Double(minute - 8) / 4.0, 2))
+                bpm += spike * 120
+            } else if hour == 13 && minute >= 20 && minute <= 90 {
+                bpm += 55 + sin(Double(minute) / 8.0) * 18
+            } else if hour >= 18 && hour <= 20 {
+                bpm += 40 + sin(Double(minute) / 6.0) * 12
+            }
+            points.append(TrendPoint(
+                id: "\(ts)",
+                date: Date(timeIntervalSince1970: TimeInterval(ts)),
+                value: min(195, max(52, bpm))
+            ))
+            ts += step
+        }
+        return points
     }
 }

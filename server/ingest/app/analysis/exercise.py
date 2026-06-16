@@ -177,6 +177,16 @@ MERGE_GAP_S: float = 150.0
 #: real workout merely because the zone math was unavailable.
 MIN_INTENSITY_Z2PLUS: float = 0.50
 
+#: HR-only elevation windows (no motion gate) — morning wake, stress spikes, etc.
+MIN_HR_ELEVATION_MIN: float = 2.0
+HR_ELEVATION_MARGIN_BPM: float = 10.0
+HR_ELEVATION_PEAK_MIN: int = 115
+HR_ELEVATION_MERGE_GAP_S: float = 90.0
+HR_ELEVATION_OVERLAP_FRAC: float = 0.35
+# HR-only bouts longer than this are usually all-day elevated FC (stress, heat, walking
+# around) rather than a discrete session — cap to avoid 3h+ false positives.
+MAX_HR_ELEVATION_DURATION_MIN: float = 120.0
+
 #: Nearest-ts alignment tolerance (seconds) when binding HR to gravity (and
 #: vice-versa). At 1 Hz, samples within this are treated as coincident. 5 s
 #: covers firmware clock skew and BLE delivery jitter without mispairing samples
@@ -594,3 +604,167 @@ def detect_exercises(
             )
         )
     return sessions
+
+
+def detect_hr_elevations(
+    streams: dict[str, list[dict]],
+    *,
+    resting_hr: Optional[float] = None,
+    max_hr: Optional[float] = None,
+    existing_sessions: Optional[Sequence[ExerciseSession]] = None,
+    age: Optional[float] = None,
+    profile: Optional[dict] = None,
+) -> list[ExerciseSession]:
+    """Detect sustained HR elevations without requiring motion.
+
+    Catches morning wake spikes, stress, and other FC rises that ``detect_exercises``
+    rejects because gravity stays still. Skips windows that substantially overlap an
+    existing motion-qualified session.
+    """
+    hr_seg = _clean_hr(streams.get("hr") or [])
+    if not hr_seg:
+        return []
+
+    if resting_hr is None:
+        resting_hr = _derive_resting_hr(hr_seg)
+    hr_floor = float(resting_hr) + HR_ELEVATION_MARGIN_BPM
+
+    if max_hr is not None:
+        eff_max_hr: Optional[float] = float(max_hr)
+        hrmax_source = "caller"
+    else:
+        day_bpms = [v for _, v in hr_seg]
+        eff_max_hr, hrmax_source = estimate_hrmax(day_bpms, age=age)
+        if eff_max_hr == 0.0:
+            eff_max_hr = None
+
+    elevated: list[float] = []
+    for ts, bpm in hr_seg:
+        if bpm > hr_floor:
+            elevated.append(ts)
+
+    if not elevated:
+        return []
+
+    runs: list[tuple[float, float]] = []
+    run_start = elevated[0]
+    prev = elevated[0]
+    for ts in elevated[1:]:
+        if ts - prev > HR_ELEVATION_MERGE_GAP_S:
+            runs.append((run_start, prev))
+            run_start = ts
+        prev = ts
+    runs.append((run_start, prev))
+
+    min_dur_s = MIN_HR_ELEVATION_MIN * 60.0
+    existing = list(existing_sessions or [])
+    sessions: list[ExerciseSession] = []
+    for start, end in runs:
+        window = [(t, v) for t, v in hr_seg if start <= t <= end]
+        if not window:
+            continue
+        bpms = [v for _, v in window]
+        peak_hr = int(round(max(bpms)))
+        duration_s = end - start
+        if peak_hr < HR_ELEVATION_PEAK_MIN:
+            continue
+        if duration_s < min_dur_s and not (peak_hr >= 140 and duration_s >= 60):
+            continue
+        if duration_s > MAX_HR_ELEVATION_DURATION_MIN * 60.0:
+            continue
+        if _overlaps_existing(start, end, existing, HR_ELEVATION_OVERLAP_FRAC):
+            continue
+
+        hr_series = [{"ts": t, "bpm": v} for t, v in window]
+        if eff_max_hr is not None and eff_max_hr > resting_hr:
+            zone_pct, avg_hrr = _bout_intensity(hr_series, resting_hr, eff_max_hr)
+        else:
+            zone_pct, avg_hrr = {}, None
+
+        calories_kcal: Optional[float] = None
+        calories_kj: Optional[float] = None
+        if profile is not None:
+            calories_kcal, calories_kj = _estimate_bout_calories(
+                hr_series,
+                profile=profile,
+                hrmax=eff_max_hr,
+                resting_hr=resting_hr,
+            )
+
+        sessions.append(
+            ExerciseSession(
+                start=start,
+                end=end,
+                avg_hr=statistics.fmean(bpms),
+                peak_hr=peak_hr,
+                strain=_strain(
+                    hr_series,
+                    max_hr=eff_max_hr,
+                    resting_hr=resting_hr,
+                ),
+                kind="hr_elevation",
+                duration_s=duration_s,
+                zone_time_pct=zone_pct,
+                avg_hrr_pct=avg_hrr,
+                hrmax=eff_max_hr,
+                hrmax_source=hrmax_source,
+                calories_kcal=calories_kcal,
+                calories_kj=calories_kj,
+                motion_var=None,
+                hr_peaks_per_min=_hr_peaks_per_min(hr_series),
+            )
+        )
+    return sessions
+
+
+def _overlaps_existing(
+    start: float,
+    end: float,
+    existing: Sequence[ExerciseSession],
+    frac_threshold: float,
+) -> bool:
+    """True when ``[start, end]`` substantially overlaps any existing session."""
+    dur = end - start
+    if dur <= 0:
+        return False
+    for e in existing:
+        o_start = max(start, e.start)
+        o_end = min(end, e.end)
+        if o_end <= o_start:
+            continue
+        overlap = o_end - o_start
+        dur_e = e.end - e.start
+        if dur_e <= 0:
+            continue
+        if overlap / dur >= frac_threshold or overlap / dur_e >= frac_threshold:
+            return True
+    return False
+
+
+def _session_priority(s: ExerciseSession) -> tuple[float, float, float]:
+    """Higher is better when deduping overlapping bouts."""
+    motion = 1.0 if s.kind != "hr_elevation" else 0.0
+    strain = float(s.strain or 0.0)
+    z2plus = 0.0
+    if s.zone_time_pct:
+        z2plus = sum(s.zone_time_pct.get(z, 0.0) for z in (2, 3, 4, 5)) / 100.0
+    return (motion, strain, z2plus)
+
+
+def _sessions_overlap(a: ExerciseSession, b: ExerciseSession, frac_threshold: float) -> bool:
+    return _overlaps_existing(a.start, a.end, [b], frac_threshold)
+
+
+def dedupe_overlapping_sessions(
+    sessions: Sequence[ExerciseSession],
+    *,
+    frac_threshold: float = HR_ELEVATION_OVERLAP_FRAC,
+) -> list[ExerciseSession]:
+    """Drop lower-priority sessions when windows overlap (motion > strain > Z2+)."""
+    ranked = sorted(sessions, key=_session_priority, reverse=True)
+    kept: list[ExerciseSession] = []
+    for s in ranked:
+        if any(_sessions_overlap(s, k, frac_threshold) for k in kept):
+            continue
+        kept.append(s)
+    return sorted(kept, key=lambda s: s.start)

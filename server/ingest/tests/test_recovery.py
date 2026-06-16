@@ -24,12 +24,15 @@ from app.analysis.recovery import (
     LOGISTIC_Z0,
     RECOVERY_BASELINE_SCORE,  # = 58.0, kept for compat
     RECOVERY_POPULATION_MEAN,
+    POPULATION_HRV_MEAN,
+    POPULATION_RHR_MEAN,
     W_HRV,
     W_RHR,
     W_RESP,
     W_SLEEP,
     recovery_band,
     recovery_score,
+    recovery_is_provisional,
     resting_hr,
 )
 from app.analysis.baselines import (
@@ -214,10 +217,10 @@ class TestRecoveryScoreFormula:
 
 
 class TestRecoveryScoreColdStart:
-    """Verify cold-start behavior: None when HRV baseline not yet trusted."""
+    """Verify cold-start uses population baseline (provisional score)."""
 
-    def test_calibrating_state_returns_none(self):
-        """Fewer than MIN_NIGHTS_SEED valid nights → not usable → None."""
+    def test_calibrating_state_uses_population_baseline(self):
+        """Fewer than MIN_NIGHTS_SEED valid nights → population anchors → score."""
         few_nights = [55.0, 50.0]  # only 2 nights
         state = fold_history(few_nights, METRIC_CFG["hrv"])
         assert state.status == "calibrating"
@@ -226,7 +229,20 @@ class TestRecoveryScoreColdStart:
             "resting_hr": BaselineState(58.0, 2.0, 2, 0, "calibrating"),
         }
         r = recovery_score(55.0, 58.0, 14.0, baselines)
-        assert r is None, f"Expected None for cold-start, got {r}"
+        assert r is not None, "Expected provisional score for cold-start"
+        assert 0.0 <= r <= 100.0
+        assert recovery_is_provisional(baselines)
+
+    def test_calibrating_typical_night_near_population_mean(self):
+        """Tonight ≈ population anchors → recovery near 58%."""
+        state = fold_history([55.0, 50.0], METRIC_CFG["hrv"])
+        baselines = {"hrv": state, "resting_hr": BaselineState(58.0, 2.0, 2, 0, "calibrating")}
+        r = recovery_score(
+            POPULATION_HRV_MEAN, POPULATION_RHR_MEAN, None, baselines,
+            sleep_perf=SLEEP_PERF_CENTER,
+        )
+        assert r is not None
+        assert abs(r - RECOVERY_POPULATION_MEAN) < 5.0
 
     def test_provisional_state_returns_score(self):
         """Between MIN_NIGHTS_SEED and MIN_NIGHTS_TRUST → 'provisional' → still returns score."""

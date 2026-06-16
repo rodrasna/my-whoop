@@ -318,12 +318,12 @@ final class ServerSync {
         let cal = Calendar(identifier: .gregorian)
         let fmt = DateFormatter()
         fmt.calendar = cal
-        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.timeZone = cal.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
 
         guard let start = cal.date(byAdding: .day, value: -windowDays, to: now) else { return }
-        let fromDay = fmt.string(from: start)
-        let toDay = fmt.string(from: now)
+        let fromDay = fmt.string(from: cal.startOfDay(for: start))
+        let toDay = fmt.string(from: cal.startOfDay(for: now))
 
         // /v1/daily over the window. This is the authoritative list of days WITH data.
         guard let days = await getDaily(from: fromDay, to: toDay) else { return }
@@ -612,6 +612,85 @@ final class ServerSync {
         }
     }
 
+    // MARK: - PRVN / SugarWOD programming
+
+    struct PRVNWeekPayload: Decodable {
+        let weekStart: String
+        let trackName: String
+        let importedAt: String
+        let pasteText: String
+        let source: String?
+    }
+
+    struct PRVNSyncResult {
+        let payload: PRVNWeekPayload?
+        /// Mensaje listo para mostrar en UI cuando `payload` es nil.
+        let errorMessage: String?
+    }
+
+    /// POST /v1/prvn/sync — pulls the week from SugarWOD using server-side credentials.
+    func syncPRVNProgram(weekYYYYMMDD: String? = nil) async -> PRVNSyncResult {
+        var body: [String: Any] = ["device": deviceId]
+        if let weekYYYYMMDD { body["week"] = weekYYYYMMDD }
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+            return PRVNSyncResult(payload: nil, errorMessage: "No se pudo preparar la petición de sincronización.")
+        }
+        let response = await postForHTTPResponse(path: "/v1/prvn/sync", body: bodyData)
+        guard let http = response.http else {
+            return PRVNSyncResult(payload: nil, errorMessage: "Sin conexión con el servidor. Revisa WHOOP_BASE_URL y la red.")
+        }
+        if (200..<300).contains(http.statusCode), let data = response.data,
+           let payload = try? JSONDecoder().decode(PRVNWeekPayload.self, from: data) {
+            return PRVNSyncResult(payload: payload, errorMessage: nil)
+        }
+        return PRVNSyncResult(payload: nil, errorMessage: prvnSyncErrorMessage(
+            status: http.statusCode,
+            detail: response.detail
+        ))
+    }
+
+    private func prvnSyncErrorMessage(status: Int, detail: String?) -> String {
+        let d = detail?.lowercased() ?? ""
+        switch status {
+        case 401, 403:
+            return "API key del servidor inválida. Revisa WHOOP_API_KEY en Secrets.xcconfig."
+        case 503:
+            if d.contains("not configured") || d.contains("credentials") {
+                return "Credenciales SugarWOD no configuradas en el servidor. Añade SUGARWOD_EMAIL y SUGARWOD_PASSWORD al .env del servidor."
+            }
+            return detail.map { "Servidor no disponible: \($0)" }
+                ?? "Servidor no disponible (HTTP 503). Revisa que el stack Docker esté en marcha."
+        case 502:
+            if d.contains("login failed") || d.contains("login http") {
+                return "Usuario o contraseña SugarWOD incorrectos en el servidor."
+            }
+            if d.contains("csrf") {
+                return "SugarWOD rechazó el inicio de sesión. Comprueba las credenciales en el servidor."
+            }
+            if d.contains("session expired") || d.contains("not logged in") {
+                return "La sesión SugarWOD expiró en el servidor. Vuelve a sincronizar en unos minutos."
+            }
+            if d.contains("track not found") {
+                return "Pista PRVN no encontrada en SugarWOD. Revisa SUGARWOD_TRACK en el servidor."
+            }
+            if d.contains("no workouts") {
+                return "SugarWOD no devolvió entrenos para esa semana."
+            }
+            return detail.map { "Error SugarWOD: \($0)" } ?? "Error al conectar con SugarWOD (HTTP 502)."
+        case 400:
+            return detail.map { "Petición inválida: \($0)" } ?? "Semana inválida en la petición de sincronización."
+        default:
+            if let detail, !detail.isEmpty { return detail }
+            return "No se pudo sincronizar PRVN (HTTP \(status))."
+        }
+    }
+
+    /// GET /v1/prvn/week — cached week on server (no SugarWOD login).
+    func fetchPRVNProgram() async -> PRVNWeekPayload? {
+        guard let data = await get(path: "/v1/prvn/week?device=\(deviceId)") else { return nil }
+        return try? JSONDecoder().decode(PRVNWeekPayload.self, from: data)
+    }
+
     // MARK: - Workout calorie backfill
 
     /// POST /v1/backfill-workouts {device, from, to} (YYYY-MM-DD UTC).
@@ -642,23 +721,54 @@ final class ServerSync {
         }
     }
 
-    /// Perform a POST with Bearer auth + JSON body. Returns true on 2xx, false otherwise.
-    private func post(path: String, body: Data) async -> Bool {
+    private struct HTTPResponsePayload {
+        let data: Data?
+        let http: HTTPURLResponse?
+        let detail: String?
+    }
+
+    /// Perform a POST with Bearer auth + JSON body. Returns body Data on 2xx, nil otherwise.
+    private func postForData(path: String, body: Data) async -> Data? {
+        let result = await postForHTTPResponse(path: path, body: body)
+        guard let http = result.http, (200..<300).contains(http.statusCode) else { return nil }
+        return result.data
+    }
+
+    private func postForHTTPResponse(path: String, body: Data) async -> HTTPResponsePayload {
         guard let url = URL(string: path, relativeTo: config.baseURL)
-                     ?? URL(string: config.baseURL.absoluteString + path) else { return false }
+                     ?? URL(string: config.baseURL.absoluteString + path) else {
+            return HTTPResponsePayload(data: nil, http: nil, detail: nil)
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         do {
-            let (_, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else { return false }
-            return true
+            let (data, response) = try await session.data(for: request)
+            let http = response as? HTTPURLResponse
+            let detail = http.flatMap { Self.fastAPIDetail(from: data, status: $0.statusCode) }
+            return HTTPResponsePayload(data: data, http: http, detail: detail)
         } catch {
-            return false
+            return HTTPResponsePayload(data: nil, http: nil, detail: nil)
         }
+    }
+
+    /// Parses FastAPI `{"detail": "..."}` or `{"detail":[{"msg":"..."}]}`.
+    private static func fastAPIDetail(from data: Data?, status: Int) -> String? {
+        guard status >= 400, let data, !data.isEmpty else { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = json["detail"] else { return nil }
+        if let s = detail as? String { return s }
+        if let items = detail as? [[String: Any]] {
+            return items.compactMap { $0["msg"] as? String }.joined(separator: "; ")
+        }
+        return nil
+    }
+
+    /// Perform a POST with Bearer auth + JSON body. Returns true on 2xx, false otherwise.
+    private func post(path: String, body: Data) async -> Bool {
+        await postForData(path: path, body: body) != nil
     }
 }
 

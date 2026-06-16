@@ -16,9 +16,12 @@ from app.analysis.exercise import (
     ExerciseSession,
     MERGE_GAP_S,
     MIN_EXERCISE_MIN,
+    MIN_HR_ELEVATION_MIN,
     MIN_INTENSITY_Z2PLUS,
     HR_MARGIN_BPM,
     detect_exercises,
+    detect_hr_elevations,
+    dedupe_overlapping_sessions,
 )
 from app.analysis.strain import (
     _edwards_trimp,
@@ -128,8 +131,13 @@ def test_elevated_hr_no_motion_not_detected():
         "hr": _hr_block(T0, n, 150),       # high HR
         "gravity": _gravity_still(T0, n),  # but no motion
     }
-    # Intentional: high HR without motion (stress/fever) is NOT an exercise.
+    # Motion-qualified detector intentionally skips this.
     assert detect_exercises(streams, resting_hr=55, max_hr=190) == []
+    # HR-only elevation path still surfaces it for the activity list.
+    elevations = detect_hr_elevations(streams, resting_hr=55, max_hr=190)
+    assert len(elevations) == 1
+    assert elevations[0].kind == "hr_elevation"
+    assert elevations[0].peak_hr == 150
 
 
 # ---------------------------------------------------------------------------
@@ -945,3 +953,66 @@ def test_unrelated_workouts_beyond_merge_gap_stay_separate():
         f"Two workouts 30-min apart must stay as 2 sessions (MERGE_GAP_S={MERGE_GAP_S} s); "
         f"got {len(sessions)}"
     )
+
+
+def test_dedupe_drops_overlapping_hr_elevation_inside_exercise():
+    """A long hr_elevation fully containing a motion bout should not survive dedupe."""
+    motion = ExerciseSession(
+        start=1000.0,
+        end=1000.0 + 75 * 60,
+        avg_hr=140.0,
+        peak_hr=165,
+        strain=8.5,
+        kind=None,
+        duration_s=75 * 60,
+        zone_time_pct={2: 40.0, 3: 30.0},
+        avg_hrr_pct=55.0,
+        hrmax=190.0,
+        hrmax_source="caller",
+    )
+    elevation = ExerciseSession(
+        start=1000.0 - 18 * 60,
+        end=1000.0 + 216 * 60,
+        avg_hr=120.0,
+        peak_hr=130,
+        strain=2.0,
+        kind="hr_elevation",
+        duration_s=216 * 60 + 18 * 60,
+        zone_time_pct={1: 80.0},
+        avg_hrr_pct=30.0,
+        hrmax=190.0,
+        hrmax_source="caller",
+    )
+    kept = dedupe_overlapping_sessions([motion, elevation])
+    assert len(kept) == 1
+    assert kept[0].kind is None
+    assert kept[0].strain == 8.5
+
+
+def test_hr_elevation_skipped_when_overlapping_motion_session():
+    """detect_hr_elevations must not add a long bout that wraps a real workout."""
+    n = 75 * 60
+    pad = 18 * 60
+    streams = {
+        "hr": _merge(
+            _hr_block(T0 - pad, pad, 110),
+            _hr_block(T0, n, 150),
+            _hr_block(T0 + n, pad, 110),
+        ),
+        "gravity": _merge(
+            _gravity_still(T0 - pad, pad),
+            _gravity_active(T0, n),
+            _gravity_still(T0 + n, pad),
+        ),
+    }
+    exercises = detect_exercises(streams, resting_hr=55, max_hr=190)
+    assert len(exercises) == 1
+    elevations = detect_hr_elevations(
+        streams,
+        resting_hr=55,
+        max_hr=190,
+        existing_sessions=exercises,
+    )
+    all_sessions = dedupe_overlapping_sessions(exercises + elevations)
+    assert len(all_sessions) == 1
+    assert all_sessions[0].kind is None

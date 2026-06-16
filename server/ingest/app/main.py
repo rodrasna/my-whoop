@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 from . import db, ingest, read, store
 from .analysis import daily
 from .config import load_config
+from .sugarwod import service as sugarwod_service
+from .sugarwod.client import SugarWODError
 
 _log = logging.getLogger("whoop.ingest")
 
@@ -324,6 +326,43 @@ def upsert_profile(body: ProfileBody):
         conn.commit()
         row = read.query_profile(conn, body.device)
     return row
+
+
+# ── PRVN / SugarWOD programming ─────────────────────────────────────────────
+
+class PRVNSyncBody(BaseModel):
+    device: str
+    week: str | None = None  # Monday YYYYMMDD; default = current week
+
+
+@app.get("/v1/prvn/week", dependencies=[Depends(require_auth)])
+def get_prvn_week(device: str):
+    """Cached PRVN week (paste text + metadata) synced from SugarWOD."""
+    payload = sugarwod_service.load_cached(cfg.raw_root, device)
+    if not payload:
+        raise HTTPException(status_code=404, detail="no PRVN week cached; POST /v1/prvn/sync first")
+    return payload
+
+
+@app.post("/v1/prvn/sync", dependencies=[Depends(require_auth)])
+def post_prvn_sync(body: PRVNSyncBody):
+    """Login to SugarWOD (server credentials) and refresh the PRVN week cache."""
+    if not sugarwod_service.sugarwod_configured():
+        raise HTTPException(status_code=503, detail="SugarWOD credentials not configured on server")
+    week = body.week
+    if week is not None and (len(week) != 8 or not week.isdigit()):
+        raise HTTPException(status_code=400, detail="week must be YYYYMMDD (Monday)")
+    try:
+        with psycopg.connect(cfg.db_dsn) as conn:
+            store.ensure_device(conn, body.device)
+            conn.commit()
+        return sugarwod_service.sync_week(
+            raw_root=cfg.raw_root,
+            device_id=body.device,
+            week_monday_yyyymmdd=week,
+        )
+    except SugarWODError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ── Workouts endpoint ─────────────────────────────────────────────────────────

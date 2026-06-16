@@ -13,7 +13,7 @@ enum RingDestination: String, Identifiable, Hashable {
 struct SleepRingDetailView: View {
     @EnvironmentObject private var metrics: MetricsRepository
     @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
-    @State private var baselines = BaselineCalculator.Averages()
+    @State private var weekRows: [DailyMetric] = []
 
     private var scorePercent: Double? {
         if let e = detail?.session.efficiency, e > 0 { return e * 100 }
@@ -27,22 +27,30 @@ struct SleepRingDetailView: View {
             ScrollView {
                 VStack(spacing: WH.Spacing.lg) {
                     if let score = scorePercent {
-                        SleepPerformanceRing(scorePercent: score)
-                            .padding(.top, WH.Spacing.md)
+                        SleepPerformanceRing(scorePercent: score, size: WH.Ring.detailHeroDiameter)
+                            .padding(.top, WH.Spacing.lg)
                     } else {
                         placeholderRing(label: "Sin datos de sueño")
                     }
 
-                    if metrics.isDemoPreviewActive {
-                        previewChip
-                    }
+                    if metrics.isDemoPreviewActive { previewChip }
 
                     if let detail {
                         sleepMetricsCard(session: detail.session, daily: detail.daily)
                     }
 
+                    ringWeekChart(
+                        title: "Sueño · últimos 7 días",
+                        points: WeeklyChartBuilder.last7Days(from: weekRows) { m in
+                            m.totalSleepMin.map { $0 / 60 }
+                        },
+                        maxValue: 10,
+                        color: WH.Color.sleepPurple,
+                        format: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") }
+                    )
+
                     NavigationLink(destination: MetricDetailView(kind: .sleepDuration)) {
-                        detailLinkRow(title: "Historial de sueño", icon: "chart.bar")
+                        detailLinkRow(title: "Historial completo", icon: "chart.bar")
                     }
                     .buttonStyle(.plain)
 
@@ -60,26 +68,27 @@ struct SleepRingDetailView: View {
 
     private func load() async {
         detail = await metrics.sleepDetail()
-        baselines = await metrics.thirtyDayBaselines()
+        weekRows = await metrics.dailyLastDays(7)
     }
 
     private func sleepMetricsCard(session: CachedSleepSession, daily: DailyMetric?) -> some View {
         DashboardCard {
             metricRow(label: "Tiempo dormido",
                       value: formatMinutes(daily?.totalSleepMin ?? Double(session.endTs - session.startTs) / 60),
-                      baseline: BaselineCalculator.formatBaseline(baselines.sleepMin, decimals: 0))
+                      subtitle: TodayMetricHelpers.sleepWindowLabel(sleep: session))
             DashboardDivider()
             metricRow(label: "Eficiencia",
-                      value: daily?.efficiency.map { "\(Int(($0 * 100).rounded()))%" } ?? "—",
-                      baseline: nil)
+                      value: daily?.efficiency.map { "\(Int(($0 * 100).rounded()))%" }
+                          ?? session.efficiency.map { "\(Int(($0 * 100).rounded()))%" } ?? "—",
+                      subtitle: "de esta noche")
             DashboardDivider()
             metricRow(label: "VFC",
-                      value: (daily?.avgHrv ?? session.avgHrv).map { String(format: "%.0f ms", $0) } ?? "—",
-                      baseline: BaselineCalculator.formatBaseline(baselines.hrv, decimals: 0, unit: "ms"))
+                      value: session.avgHrv.map { String(format: "%.0f ms", $0) } ?? "—",
+                      subtitle: "durante el sueño")
             DashboardDivider()
             metricRow(label: "FC en reposo",
-                      value: (daily?.restingHr ?? session.restingHr).map { "\($0) lpm" } ?? "—",
-                      baseline: BaselineCalculator.formatBaseline(baselines.rhr, decimals: 0, unit: "lpm"))
+                      value: session.restingHr.map { "\($0) lpm" } ?? "—",
+                      subtitle: "durante el sueño")
         }
     }
 }
@@ -88,12 +97,26 @@ struct SleepRingDetailView: View {
 
 struct RecoveryRingDetailView: View {
     @EnvironmentObject private var metrics: MetricsRepository
-    @State private var baselines = BaselineCalculator.Averages()
+    @State private var weekRows: [DailyMetric] = []
     @State private var nightCount = 0
 
     private var recoveryPct: Double? {
-        metrics.today?.recovery.map { $0 * 100 }
+        TodayMetricHelpers.recoveryPercent(
+            sleep: metrics.lastNight,
+            daily: metrics.today,
+            sleepNights: nightCount
+        )?.percent
     }
+
+    private var recoveryProvisional: Bool {
+        TodayMetricHelpers.recoveryPercent(
+            sleep: metrics.lastNight,
+            daily: metrics.today,
+            sleepNights: nightCount
+        )?.provisional ?? false
+    }
+
+    private var sleep: CachedSleepSession? { metrics.lastNight }
 
     var body: some View {
         ZStack {
@@ -101,8 +124,8 @@ struct RecoveryRingDetailView: View {
             ScrollView {
                 VStack(spacing: WH.Spacing.lg) {
                     if let pct = recoveryPct {
-                        RecoveryRing(percent: pct, size: 220)
-                            .padding(.top, WH.Spacing.md)
+                        RecoveryRing(percent: pct, size: WH.Ring.detailHeroDiameter, provisional: recoveryProvisional)
+                            .padding(.top, WH.Spacing.lg)
                     } else {
                         placeholderRing(label: "Sin recuperación aún")
                     }
@@ -111,32 +134,46 @@ struct RecoveryRingDetailView: View {
                         CalibrationBanner(
                             completedNights: nightCount,
                             title: "Calibrando tu recuperación",
-                            footnote: "La recuperación necesita ~4 noches con el strap. Llevas \(nightCount)."
+                            footnote: recoveryPct != nil
+                                ? "Este % es provisional — mejora cuando lleves 4 noches con el strap"
+                                : "La recuperación necesita ~4 noches con el strap. Llevas \(nightCount)."
                         )
                     }
 
                     if metrics.isDemoPreviewActive { previewChip }
 
                     DashboardCard {
+                        metricRow(label: "Recuperación hoy",
+                                  value: recoveryPct.map { "\(Int($0.rounded()))%" } ?? "—",
+                                  subtitle: recoveryProvisional ? "provisional · calibrando" : yesterdayRecoveryLabel)
+                        DashboardDivider()
                         metricRow(label: "VFC",
                                   value: hrvValue,
-                                  baseline: BaselineCalculator.formatBaseline(baselines.hrv, decimals: 0, unit: "ms"))
+                                  subtitle: TodayMetricHelpers.sleepWindowLabel(sleep: sleep) ?? "de anoche")
                         DashboardDivider()
                         metricRow(label: "FC en reposo",
                                   value: rhrValue,
-                                  baseline: BaselineCalculator.formatBaseline(baselines.rhr, decimals: 0, unit: "lpm"))
+                                  subtitle: "durante el sueño")
                         DashboardDivider()
-                        metricRow(label: "SpO2",
+                        metricRow(label: "SpO₂",
                                   value: metrics.today?.spo2Pct.map { String(format: "%.0f%%", $0) } ?? "—",
-                                  baseline: nil)
+                                  subtitle: "hoy")
                         DashboardDivider()
                         metricRow(label: "Respiración",
                                   value: metrics.today?.respRateBpm.map { String(format: "%.1f rpm", $0) } ?? "—",
-                                  baseline: nil)
+                                  subtitle: "hoy")
                     }
 
+                    ringWeekChart(
+                        title: "Recuperación · últimos 7 días",
+                        points: WeeklyChartBuilder.last7Days(from: weekRows) { $0.recovery.map { $0 * 100 } },
+                        maxValue: 100,
+                        color: WH.Color.recoveryGreen,
+                        format: { "\(Int($0.rounded()))" }
+                    )
+
                     NavigationLink(destination: MetricDetailView(kind: .recovery)) {
-                        detailLinkRow(title: "Historial de recuperación", icon: "chart.line.uptrend.xyaxis")
+                        detailLinkRow(title: "Historial completo", icon: "chart.line.uptrend.xyaxis")
                     }
                     .buttonStyle(.plain)
 
@@ -153,17 +190,23 @@ struct RecoveryRingDetailView: View {
     }
 
     private var hrvValue: String {
-        let h = metrics.today?.avgHrv ?? metrics.lastNight?.avgHrv
-        return h.map { String(format: "%.0f ms", $0) } ?? "—"
+        TodayMetricHelpers.hrvMs(sleep: sleep, daily: metrics.today)
+            .map { String(format: "%.0f ms", $0) } ?? "—"
     }
 
     private var rhrValue: String {
-        let r = metrics.today?.restingHr ?? metrics.lastNight?.restingHr
-        return r.map { "\($0) lpm" } ?? "—"
+        TodayMetricHelpers.restingHr(sleep: sleep, daily: metrics.today)
+            .map { "\($0) lpm" } ?? "—"
+    }
+
+    private var yesterdayRecoveryLabel: String? {
+        guard weekRows.count >= 2,
+              let y = weekRows.dropLast().last?.recovery else { return nil }
+        return "ayer \(Int((y * 100).rounded()))%"
     }
 
     private func load() async {
-        baselines = await metrics.thirtyDayBaselines()
+        weekRows = await metrics.dailyLastDays(7)
         nightCount = await metrics.sleepNightCount()
     }
 }
@@ -172,7 +215,8 @@ struct RecoveryRingDetailView: View {
 
 struct StrainRingDetailView: View {
     @EnvironmentObject private var metrics: MetricsRepository
-    @State private var baselines = BaselineCalculator.Averages()
+    @State private var weekRows: [DailyMetric] = []
+    @State private var todayKcal: Double?
 
     private var strain: Double? { metrics.today?.strain }
 
@@ -182,8 +226,8 @@ struct StrainRingDetailView: View {
             ScrollView {
                 VStack(spacing: WH.Spacing.lg) {
                     if let s = strain {
-                        StrainRing(strain: s)
-                            .padding(.top, WH.Spacing.md)
+                        StrainRing(strain: s, size: WH.Ring.detailHeroDiameter)
+                            .padding(.top, WH.Spacing.lg)
                     } else {
                         placeholderRing(label: "Sin esfuerzo registrado")
                     }
@@ -191,19 +235,31 @@ struct StrainRingDetailView: View {
                     if metrics.isDemoPreviewActive { previewChip }
 
                     DashboardCard {
-                        metricRow(label: "Esfuerzo máx. día",
-                                  value: strain.map { String(format: "%.1f / 21", $0) } ?? "—",
-                                  baseline: BaselineCalculator.formatBaseline(baselines.strain, decimals: 1))
+                        metricRow(label: "Esfuerzo hoy",
+                                  value: strain.map {
+                                      "\(WH.Ring.strainPercent($0))% · \(String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",")) / 21"
+                                  } ?? "—",
+                                  subtitle: yesterdayStrainLabel)
                         DashboardDivider()
-                        metricRow(label: "Zonas FC 1–3", value: "—", baseline: "Próximamente")
+                        metricRow(label: "Calorías hoy",
+                                  value: todayKcal.map { "\(Int($0.rounded())) kcal" } ?? "—",
+                                  subtitle: "de entrenos detectados")
                         DashboardDivider()
-                        metricRow(label: "Zonas FC 4–5", value: "—", baseline: "Próximamente")
-                        DashboardDivider()
-                        metricRow(label: "Calorías", value: "—", baseline: "Próximamente")
+                        metricRow(label: "Entrenos hoy",
+                                  value: metrics.today?.exerciseCount.map { "\($0)" } ?? "—",
+                                  subtitle: "sesiones con esfuerzo")
                     }
 
+                    ringWeekChart(
+                        title: "Esfuerzo · últimos 7 días",
+                        points: WeeklyChartBuilder.last7Days(from: weekRows) { $0.strain },
+                        maxValue: 21,
+                        color: WH.Color.strainBlue,
+                        format: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") }
+                    )
+
                     NavigationLink(destination: MetricDetailView(kind: .strain)) {
-                        detailLinkRow(title: "Historial de esfuerzo", icon: "chart.bar.fill")
+                        detailLinkRow(title: "Historial completo", icon: "chart.bar.fill")
                     }
                     .buttonStyle(.plain)
 
@@ -216,23 +272,62 @@ struct StrainRingDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
-        .task { baselines = await metrics.thirtyDayBaselines() }
+        .task { await load() }
+    }
+
+    private var yesterdayStrainLabel: String? {
+        guard weekRows.count >= 2,
+              let y = weekRows.dropLast().last?.strain else { return nil }
+        return String(format: "ayer %.1f", y).replacingOccurrences(of: ".", with: ",")
+    }
+
+    private func load() async {
+        weekRows = await metrics.dailyLastDays(7)
+        let today = MetricsRepository.utcDayString(for: Date())
+        let workouts = await metrics.workouts(from: today, to: today)
+        let kcal = workouts.compactMap(\.caloriesKcal).reduce(0, +)
+        todayKcal = kcal > 0 ? kcal : nil
     }
 }
 
 // MARK: - Shared helpers
 
-private func placeholderRing(label: String) -> some View {
-    ZStack {
-        Circle()
-            .stroke(WH.Color.ringTrack, lineWidth: 16)
-            .frame(width: 220, height: 220)
-        Text(label)
-            .font(WH.Font.caption)
-            .foregroundStyle(WH.Color.textSecondary)
-            .multilineTextAlignment(.center)
-            .padding()
+private func ringWeekChart(
+    title: String,
+    points: [WeeklyBarPoint],
+    maxValue: Double,
+    color: Color,
+    format: @escaping (Double) -> String
+) -> some View {
+    Group {
+        if points.contains(where: { $0.value > 0 }) {
+            WeeklyBarChart(
+                title: title,
+                points: points,
+                maxValue: maxValue,
+                barColor: color,
+                formatValue: format
+            )
+        }
     }
+}
+
+private func placeholderRing(label: String) -> some View {
+    let d = WH.Ring.detailHeroDiameter
+    return VStack(spacing: WH.Spacing.md) {
+        ZStack {
+            ProgressRing(progress: 0, color: WH.Color.textSecondary, diameter: d,
+                         strokeWidth: WH.Ring.heroStroke(diameter: d), showGlow: false)
+            Text(label)
+                .font(WH.Font.caption)
+                .foregroundStyle(WH.Color.textSecondary)
+                .multilineTextAlignment(.center)
+                .frame(width: d * 0.62)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, WH.Spacing.lg)
+    }
+    .frame(maxWidth: .infinity)
 }
 
 private var previewChip: some View {
@@ -246,7 +341,7 @@ private var previewChip: some View {
     .frame(maxWidth: .infinity, alignment: .leading)
 }
 
-private func metricRow(label: String, value: String, baseline: String?) -> some View {
+private func metricRow(label: String, value: String, subtitle: String?) -> some View {
     HStack {
         Text(label.uppercased())
             .font(.system(size: 12, weight: .bold))
@@ -258,8 +353,8 @@ private func metricRow(label: String, value: String, baseline: String?) -> some 
                 .font(.system(size: 22, weight: .bold, design: .rounded))
                 .foregroundStyle(WH.Color.textPrimary)
                 .monospacedDigit()
-            if let baseline {
-                Text("media 30d: \(baseline)")
+            if let subtitle {
+                Text(subtitle)
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
             }
@@ -286,11 +381,11 @@ private func detailLinkRow(title: String, icon: String) -> some View {
                 in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
 }
 
-private func formatMinutes(_ totalMin: Double) -> String {
-    guard totalMin > 0 else { return "—" }
-    let hours = Int(totalMin) / 60
-    let mins = Int(totalMin) % 60
-    if hours > 0 && mins > 0 { return "\(hours)h \(mins)m" }
-    if hours > 0 { return "\(hours)h" }
-    return "\(mins)m"
+private func formatMinutes(_ minutes: Double) -> String {
+    let total = Int(minutes.rounded())
+    let h = total / 60
+    let m = total % 60
+    if h > 0 && m > 0 { return "\(h)h \(m)m" }
+    if h > 0 { return "\(h)h" }
+    return "\(m)m"
 }

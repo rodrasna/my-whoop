@@ -71,3 +71,6 @@ fixtures/soak_*.bin
 # Server secrets (local-only)
 server/.env
 .env
+
+# Context export for external dev tools (local-only, not versioned)
+docs/context/

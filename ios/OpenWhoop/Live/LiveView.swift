@@ -42,6 +42,7 @@ private struct LiveContentView: View {
     @ObservedObject var model: LiveViewModel
     var metrics: MetricsRepository
 
+    @Environment(\.dismiss) private var dismiss
     @State private var showingSettings = false
 
     /// Research toggle, backed by the same UserDefaults key BLEManager.bootstrapStore() reads.
@@ -68,7 +69,18 @@ private struct LiveContentView: View {
             ScrollView {
                 VStack(spacing: WH.Spacing.md) {
                     // Custom tight header (replaces the hidden system large-title nav bar)
-                    ScreenHeader("Dispositivo")
+                    ScreenHeader("Dispositivo") {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 28))
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(WH.Color.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Cerrar")
+                    }
                     settingsRow
                     connectionSection
                     liveSection

@@ -74,6 +74,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// this guard those re-entries re-blasted hello/SET_CLOCK at the strap mid-offload and stopped it
     /// from streaming type-47 — THE iOS "won't serve" root cause. Reset on disconnect.
     private var connectHandshakeDone = false
+    /// Called once per BLE connect after the handshake (hello, SET_CLOCK, …) completes.
+    var onStrapReady: (() -> Void)?
+
+    /// True when alarm commands can be sent to the strap.
+    var isStrapReadyForCommands: Bool {
+        peripheral != nil && cmdCharacteristic != nil && connectHandshakeDone
+    }
     /// Re-entrancy guard for captureRawAccel: true while a bounded on-demand window is running.
     /// A second tap is a no-op until the active capture's asyncAfter block fires and clears this.
     private var rawCaptureInFlight = false
@@ -496,19 +503,35 @@ public final class BLEManager: NSObject, ObservableObject {
     /// the smart-wake layer (`SmartAlarmController`) fires on top of this if conditions are met,
     /// but this firmware alarm always fires as the safety net.
     ///
-    /// On-device verification needed: confirm the strap ACKs SET_ALARM_TIME and that the
-    /// alarm persists across BLE disconnect (cannot be verified in the simulator).
-    func armStrapAlarm(at date: Date) {
+    /// Returns false when the strap is not connected / handshake not done.
+    @discardableResult
+    func armStrapAlarm(at date: Date) -> Bool {
+        guard isStrapReadyForCommands else {
+            log("Alarm: arm skipped — strap not ready (connected=\(state.connected) handshake=\(connectHandshakeDone))")
+            return false
+        }
         let epochSec = UInt32(date.timeIntervalSince1970)
-        send(.setClock, payload: BLEManager.setClockPayload())
-        send(.setAlarmTime, payload: WhoopCommand.setAlarmPayload(epochSec: epochSec))
-        log("Alarm: armed for \(date) (epoch \(epochSec))")
+        send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.isStrapReadyForCommands else { return }
+            self.send(.setAlarmTime, payload: WhoopCommand.setAlarmPayload(epochSec: epochSec),
+                      writeType: .withResponse)
+            self.log("Alarm: armed for \(date) (epoch \(epochSec))")
+            self.getStrapAlarm()
+        }
+        return true
     }
 
     /// Disarm the currently-armed firmware alarm.
-    func disableStrapAlarm() {
-        send(.disableAlarm, payload: [0x01])
+    @discardableResult
+    func disableStrapAlarm() -> Bool {
+        guard isStrapReadyForCommands else {
+            log("Alarm: disarm skipped — strap not ready")
+            return false
+        }
+        send(.disableAlarm, payload: [0x01], writeType: .withResponse)
         log("Alarm: disarmed")
+        return true
     }
 
     /// Request the currently-armed alarm time from the strap (response arrives on cmd-notify char).
@@ -530,8 +553,14 @@ public final class BLEManager: NSObject, ObservableObject {
     ///
     /// Haptic firing cannot be verified in the simulator (no strap motor). Test on-device only.
     func testAlarmBuzz() {
-        send(.runHapticsPattern, payload: [2, 3, 0, 0, 0])  // patternId=2, 3 loops
-        send(.runAlarm, payload: [0x01])
+        guard isStrapReadyForCommands else {
+            log("Alarm: test buzz skipped — strap not ready")
+            return
+        }
+        send(.runHapticsPattern, payload: [2, 3, 0, 0, 0], writeType: .withResponse)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.send(.runAlarm, payload: [0x01], writeType: .withResponse)
+        }
         log("Alarm: test buzz fired (patternId=2, runAlarm)")
     }
 
@@ -755,6 +784,7 @@ extension BLEManager: CBPeripheralDelegate {
         // Backfiller's per-chunk insert→ack. They run from exitBackfilling() once the offload drains.
         startUploadTimer()     // keep the server current during the live session
         startBackfillTimer()   // re-offload the type-47 store every backfillIntervalSeconds
+        onStrapReady?()
     }
 
     /// SET_CLOCK(10) payload = the strap's 8-byte form: [seconds u32 LE][subseconds

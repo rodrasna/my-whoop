@@ -8,6 +8,10 @@ import SwiftUI
 struct CrossFitView: View {
     let workouts: [Workout]
     @ObservedObject var labelStore: ActivityLabelStore
+    @EnvironmentObject private var metrics: MetricsRepository
+    @StateObject private var programStore = PRVNProgramStore.shared
+    @State private var showProgramImport = false
+    @State private var recoveryPct: Int?
 
     private var sessions: [Workout] {
         workouts.filter { labelStore.effectiveType(for: $0) == .crossfit }
@@ -19,6 +23,12 @@ struct CrossFitView: View {
             WH.Color.background.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: WH.Spacing.lg) {
+                    PRVNTodayProgramCard(
+                        store: programStore,
+                        recoveryPercent: recoveryPct,
+                        onImport: { showProgramImport = true }
+                    )
+
                     if sessions.isEmpty {
                         emptyState
                     } else {
@@ -41,6 +51,25 @@ struct CrossFitView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showProgramImport) {
+            PRVNProgramImportView(store: programStore)
+        }
+        .task {
+            await metrics.refresh()
+            await loadRecovery()
+        }
+        .onChange(of: metrics.today?.recovery) { _ in
+            Task { await loadRecovery() }
+        }
+    }
+
+    private func loadRecovery() async {
+        let nights = await metrics.sleepNightCount()
+        recoveryPct = TodayMetricHelpers.recoveryPercent(
+            sleep: metrics.lastNight,
+            daily: metrics.today,
+            sleepNights: nights
+        ).map { Int($0.percent.rounded()) }
     }
 
     // MARK: - Summary
@@ -92,7 +121,7 @@ struct CrossFitView: View {
 
             VStack(spacing: 1) {
                 ForEach(sessions) { w in
-                    NavigationLink(destination: WorkoutDetailView(workout: w, labelStore: labelStore)) {
+                    NavigationLink(destination: WorkoutDetailView(workout: w, labelStore: labelStore, allWorkouts: workouts)) {
                         sessionRow(w)
                     }
                     .buttonStyle(.plain)

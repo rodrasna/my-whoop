@@ -13,6 +13,7 @@ struct MetricChart: View {
     var showAxes: Bool = true
     var showSelection: Bool = false
     var yDomain: ClosedRange<Double>? = nil
+    var xDomain: ClosedRange<Date>? = nil
     @Binding var selected: TrendPoint?
 
     // MARK: - Body
@@ -99,6 +100,7 @@ struct MetricChart: View {
             }
         }
         .chartYScale(domain: dom)
+        .chartXScaleIf(xDomain)
         .chartXAxis { xAxisContent }
         .chartYAxis { yAxisContent }
         .chartPlotStyle { plot in
@@ -125,10 +127,12 @@ struct MetricChart: View {
 
     @ChartContentBuilder
     private func recoveryBands(dom: ClosedRange<Double>) -> some ChartContent {
+        let bandStart = xDomain?.lowerBound ?? series.first!.date
+        let bandEnd = xDomain?.upperBound ?? series.last!.date
         // Green zone: 67–100
         RectangleMark(
-            xStart: .value("s", series.first!.date),
-            xEnd:   .value("e", series.last!.date),
+            xStart: .value("s", bandStart),
+            xEnd:   .value("e", bandEnd),
             yStart: .value("lo", min(67.0, dom.upperBound)),
             yEnd:   .value("hi", dom.upperBound)
         )
@@ -136,8 +140,8 @@ struct MetricChart: View {
 
         // Yellow zone: 34–67
         RectangleMark(
-            xStart: .value("s", series.first!.date),
-            xEnd:   .value("e", series.last!.date),
+            xStart: .value("s", bandStart),
+            xEnd:   .value("e", bandEnd),
             yStart: .value("lo", min(34.0, dom.upperBound)),
             yEnd:   .value("hi", min(67.0, dom.upperBound))
         )
@@ -145,8 +149,8 @@ struct MetricChart: View {
 
         // Red zone: 0–34
         RectangleMark(
-            xStart: .value("s", series.first!.date),
-            xEnd:   .value("e", series.last!.date),
+            xStart: .value("s", bandStart),
+            xEnd:   .value("e", bandEnd),
             yStart: .value("lo", dom.lowerBound),
             yEnd:   .value("hi", min(34.0, dom.upperBound))
         )
@@ -328,4 +332,15 @@ struct MetricChart: View {
 
     private func shortDateLabel(_ date: Date) -> String { Self.shortFmt.string(from: date) }
     private func mediumDateLabel(_ date: Date) -> String { Self.medFmt.string(from: date) }
+}
+
+private extension View {
+    @ViewBuilder
+    func chartXScaleIf(_ domain: ClosedRange<Date>?) -> some View {
+        if let domain {
+            self.chartXScale(domain: domain)
+        } else {
+            self
+        }
+    }
 }

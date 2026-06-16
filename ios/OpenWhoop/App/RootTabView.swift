@@ -3,7 +3,7 @@ import UIKit
 
 struct RootTabView: View {
     @State private var selection: Int = {
-        // Screenshot helper: -startTab <0..4> picks the initial tab (simulator captures only).
+        // Screenshot helper: -startTab <0..3> picks the initial tab (simulator captures only).
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-startTab"), i + 1 < args.count,
            let n = Int(args[i + 1]) { return n }
@@ -28,9 +28,9 @@ struct RootTabView: View {
                 }
                 .tag(1)
 
-            TrendsView()
+            HealthView()
                 .tabItem {
-                    Label("Tendencias", systemImage: "chart.xyaxis.line")
+                    Label("Salud", systemImage: "heart.text.square.fill")
                 }
                 .tag(2)
 
@@ -39,14 +39,6 @@ struct RootTabView: View {
                     Label("Actividad", systemImage: "bolt.fill")
                 }
                 .tag(3)
-
-            NavigationStack {
-                LiveView()
-            }
-            .tabItem {
-                Label("Dispositivo", systemImage: "dot.radiowaves.left.and.right")
-            }
-            .tag(4)
         }
         .tint(WH.Color.strainBlue)
     }

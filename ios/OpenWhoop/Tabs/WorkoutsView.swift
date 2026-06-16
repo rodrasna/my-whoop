@@ -11,14 +11,22 @@ enum ActivityRoute: Hashable { case crossfit, suggestDemo }
 struct WorkoutsView: View {
     @EnvironmentObject private var metrics: MetricsRepository
     @StateObject private var labelStore = ActivityLabelStore()
+    @StateObject private var dayPlanStore = WorkoutDayPlanStore()
+    @StateObject private var programStore = PRVNProgramStore.shared
+    @State private var showProgramImport = false
+    @State private var showDayEditor = false
+    @State private var pickerWorkout: Workout?
 
     // MARK: - State
 
     @State private var workouts: [Workout] = []
     @State private var weekRows: [DailyMetric] = []
+    @State private var selectedDate = Calendar.current.startOfDay(for: Date())
+    @State private var selectedDayMetric: DailyMetric?
     @State private var isLoading = true
     @State private var errorMessage: String? = nil
     @State private var path: [ActivityRoute] = []
+    @State private var sleepNights = 0
 
     // MARK: - Body
 
@@ -39,7 +47,7 @@ struct WorkoutsView: View {
                     CrossFitView(workouts: workouts, labelStore: labelStore)
                 case .suggestDemo:
                     if let w = workouts.first {
-                        WorkoutDetailView(workout: w, labelStore: labelStore)
+                        WorkoutDetailView(workout: w, labelStore: labelStore, allWorkouts: workouts)
                     }
                 }
             }
@@ -63,6 +71,29 @@ struct WorkoutsView: View {
             }
         }
         .refreshable { await reload() }
+        .sheet(isPresented: $showProgramImport) {
+            PRVNProgramImportView(store: programStore)
+        }
+        .sheet(isPresented: $showDayEditor) {
+            DayWorkoutEditorView(
+                dayKey: selectedDayKey,
+                selectedDate: selectedDate,
+                workouts: selectedDayActivities,
+                labelStore: labelStore,
+                dayPlanStore: dayPlanStore,
+                prvnDay: programStore.program(for: selectedDate),
+                isTrainingBout: isTrainingBout
+            )
+        }
+        .sheet(item: $pickerWorkout) { workout in
+            ActivityPickerView(workout: workout, labelStore: labelStore)
+        }
+        .onChange(of: selectedDate) { _ in
+            Task {
+                await reloadWeekRows()
+                await reloadSelectedDay()
+            }
+        }
     }
 
     // MARK: - Loading
@@ -82,16 +113,32 @@ struct WorkoutsView: View {
     private var listContent: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: WH.Spacing.lg) {
-                ScreenHeader("Actividad")
+                VStack(alignment: .leading, spacing: WH.Spacing.xs) {
+                    Text("ACTIVIDAD")
+                        .font(WH.Font.cardTitle)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .tracking(1.2)
+                    DayNavigator(selectedDate: $selectedDate, showsCalendarPicker: true)
+                }
+                .padding(.horizontal, WH.Spacing.md)
 
                 if let err = errorMessage {
                     errorBanner(err).padding(.horizontal, WH.Spacing.md)
                 }
 
                 strainRingSection
+                PRVNTodayProgramCard(
+                    store: programStore,
+                    date: selectedDate,
+                    recoveryPercent: recoveryPercentForSelectedDay,
+                    syncError: metrics.lastPRVNSyncError,
+                    onImport: { showProgramImport = true }
+                )
+                .padding(.horizontal, WH.Spacing.md)
+                sportInsightsCard
                 crossFitCard
 
-                if !weekRows.isEmpty || todayStrain != nil {
+                if !weekRows.isEmpty || selectedDayStrain != nil {
                     WeeklyBarChart(
                         title: "Esfuerzo",
                         points: WeeklyChartBuilder.last7Days(from: weekRows) { $0.strain },
@@ -112,16 +159,128 @@ struct WorkoutsView: View {
 
     private var strainRingSection: some View {
         VStack(spacing: WH.Spacing.sm) {
-            StrainRing(strain: todayStrain ?? 0, size: 200)
-                .opacity(todayStrain == nil ? 0.45 : 1)
-            if todayStrain == nil {
-                Text("Esfuerzo de hoy aún sin calcular")
+            StrainRing(strain: selectedDayStrain ?? 0, size: WH.Ring.detailHeroDiameter)
+                .opacity(selectedDayStrain == nil ? 0.45 : 1)
+            if selectedDayStrain == nil {
+                Text(isViewingToday ? "Esfuerzo de hoy aún sin calcular" : "Sin esfuerzo calculado este día")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, WH.Spacing.sm)
+    }
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(selectedDate)
+    }
+
+    private var selectedDayKey: String {
+        MetricsRepository.localDayString(for: selectedDate)
+    }
+
+    private var resolvedDayWorkout: ResolvedDayWorkout {
+        dayPlanStore.resolve(
+            dayKey: selectedDayKey,
+            workouts: selectedDayActivities,
+            labelStore: labelStore,
+            prvnDay: programStore.program(for: selectedDate),
+            isTrainingBout: isTrainingBout
+        )
+    }
+
+    // MARK: - Sport insights (semana actual)
+
+    private var sportInsightsCard: some View {
+        let dayWorkouts = selectedDayActivities.filter(isTrainingBout)
+        let dayStrain = selectedDayStrain
+        let totalKcal = selectedDayActivities.compactMap(\.caloriesKcal).reduce(0, +)
+        let unreviewed = selectedDayActivities.filter {
+            !isTrainingBout($0) && !labelStore.isDismissed($0.id)
+        }.count
+        let peak = selectedDayActivities.max { ($0.strain ?? 0) < ($1.strain ?? 0) }
+
+        return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+            Text("RESUMEN DEL DÍA")
+                .font(WH.Font.cardTitle)
+                .foregroundStyle(WH.Color.textSecondary)
+                .tracking(1.2)
+                .padding(.horizontal, WH.Spacing.md)
+
+            VStack(spacing: WH.Spacing.md) {
+                HStack(spacing: WH.Spacing.lg) {
+                    insightStat(value: "\(selectedDayActivities.count)",
+                                unit: selectedDayActivities.count == 1 ? "actividad" : "actividades",
+                                label: "DETECTADAS")
+                    insightStat(value: "\(dayWorkouts.count)",
+                                unit: dayWorkouts.count == 1 ? "entreno" : "entrenos",
+                                label: "ENTRENOS")
+                    insightStat(
+                        value: dayStrain.map { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") } ?? "—",
+                        unit: dayStrain != nil ? "strain" : nil,
+                        label: "ESFUERZO"
+                    )
+                    insightStat(
+                        value: totalKcal > 0 ? "\(Int(totalKcal.rounded()))" : "—",
+                        unit: totalKcal > 0 ? "kcal" : nil,
+                        label: "CALORÍAS"
+                    )
+                }
+
+                if let peak, let strain = peak.strain {
+                    HStack(spacing: WH.Spacing.sm) {
+                        Image(systemName: "flame.fill")
+                            .foregroundStyle(WH.Color.strainBlue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Mayor esfuerzo del día")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(WH.Color.textPrimary)
+                            Text("\(rowTime(peak.startTs)) · strain \(String(format: "%.1f", strain).replacingOccurrences(of: ".", with: ",")) · \(peak.durationS / 60) min")
+                                .font(WH.Font.caption)
+                                .foregroundStyle(WH.Color.textSecondary)
+                        }
+                        Spacer()
+                    }
+                }
+
+                if unreviewed > 0 {
+                    HStack(spacing: WH.Spacing.xs) {
+                        Image(systemName: "waveform.path.ecg")
+                            .font(.system(size: 12))
+                            .foregroundStyle(WH.Color.recoveryYellow)
+                        Text("\(unreviewed) sin revisar — desliza y toca Clasificar")
+                            .font(WH.Font.caption)
+                            .foregroundStyle(WH.Color.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(WH.Spacing.md)
+            .background(WH.Color.surface,
+                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+            .padding(.horizontal, WH.Spacing.md)
+        }
+    }
+
+    private func insightStat(value: String, unit: String?, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .lastTextBaseline, spacing: 3) {
+                Text(value)
+                    .font(WH.Font.metricMedium(size: 24))
+                    .foregroundStyle(WH.Color.textPrimary)
+                    .monospacedDigit()
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: 11))
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
+            }
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(WH.Color.textSecondary)
+                .tracking(0.6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - CrossFit hero card
@@ -172,30 +331,129 @@ struct WorkoutsView: View {
 
     // MARK: - Workouts list
 
-    private var workoutsSection: some View {
-        VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            Text("ENTRENOS DETECTADOS")
-                .font(WH.Font.cardTitle)
-                .foregroundStyle(WH.Color.textSecondary)
-                .tracking(1.2)
-                .padding(.horizontal, WH.Spacing.md)
+    private func assessment(for workout: Workout) -> BoutAssessment {
+        ActivityBoutClassifier.assess(
+            workout,
+            among: workouts,
+            isConfirmed: labelStore.isConfirmed(workout),
+            isDismissed: labelStore.isDismissed(workout.id)
+        )
+    }
 
-            if workouts.isEmpty {
-                emptyState
+    /// Actividades del día seleccionado, de más reciente a más antigua.
+    private var selectedDayActivities: [Workout] {
+        workouts.filter { isOnSelectedDay($0.startTs) }
+            .sorted { $0.startTs > $1.startTs }
+    }
+
+    private func isOnSelectedDay(_ ts: Int) -> Bool {
+        Calendar.current.isDate(
+            Date(timeIntervalSince1970: TimeInterval(ts)),
+            inSameDayAs: selectedDate
+        )
+    }
+
+    private func isTrainingBout(_ w: Workout) -> Bool {
+        !labelStore.isDismissed(w.id)
+            && (labelStore.isConfirmed(w) || assessment(for: w).category == .likelyWorkout)
+    }
+
+    private var dayActivitiesSubtitle: String {
+        let n = selectedDayActivities.count
+        let entrenos = selectedDayActivities.filter(isTrainingBout).count
+        let otras = n - entrenos
+        if n == 0 { return "Sin actividad detectada" }
+        var parts: [String] = ["\(n) detectada\(n == 1 ? "" : "s")"]
+        if entrenos > 0 { parts.append("\(entrenos) entreno\(entrenos == 1 ? "" : "s")") }
+        if otras > 0 { parts.append("\(otras) otra\(otras == 1 ? "" : "s")") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var activityListTitle: String {
+        if isViewingToday { return "HOY" }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "es_ES")
+        fmt.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        return fmt.string(from: selectedDate).capitalized
+    }
+
+    private var workoutsSection: some View {
+        VStack(alignment: .leading, spacing: WH.Spacing.lg) {
+            dayWorkoutCard
+            summaryStrip
+            if selectedDayActivities.isEmpty {
+                VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+                    Text(activityListTitle)
+                        .font(WH.Font.cardTitle)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .tracking(1.2)
+                        .padding(.horizontal, WH.Spacing.md)
+                    emptyState
+                }
             } else {
-                summaryStrip
-                workoutList
+                boutSection(
+                    title: activityListTitle,
+                    subtitle: dayActivitiesSubtitle,
+                    items: selectedDayActivities
+                )
                 autoDetectNote
             }
         }
     }
 
+    private func boutSection(title: String, subtitle: String, items: [Workout]) -> some View {
+        VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(WH.Font.cardTitle)
+                    .foregroundStyle(WH.Color.textSecondary)
+                    .tracking(1.2)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(WH.Color.textSecondary.opacity(0.75))
+            }
+            .padding(.horizontal, WH.Spacing.md)
+
+            VStack(spacing: 1) {
+                ForEach(items) { workout in
+                    NavigationLink(
+                        destination: WorkoutDetailView(
+                            workout: workout,
+                            labelStore: labelStore,
+                            allWorkouts: workouts,
+                            dayPlanStore: dayPlanStore,
+                            dayKey: selectedDayKey,
+                            prvnDay: programStore.program(for: selectedDate)
+                        )
+                    ) {
+                        workoutRow(workout)
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button {
+                            pickerWorkout = workout
+                        } label: {
+                            Label("Clasificar", systemImage: "tag.fill")
+                        }
+                        .tint(WH.Color.strainBlue)
+                    }
+                }
+            }
+            .background(WH.Color.surface,
+                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+            .padding(.horizontal, WH.Spacing.md)
+        }
+    }
+
     private var summaryStrip: some View {
-        let count = workouts.count
-        let totalMin = workouts.reduce(0) { $0 + $1.durationS } / 60
+        let train = selectedDayActivities.filter(isTrainingBout).count
+        let other = selectedDayActivities.count - train
+        let dayMin = selectedDayActivities.reduce(0) { $0 + $1.durationS } / 60
         return HStack(spacing: WH.Spacing.lg) {
-            summaryItem(value: "\(count)", unit: count == 1 ? "entreno" : "entrenos", label: "ÚLTIMOS 30 DÍAS")
-            summaryItem(value: "\(totalMin)", unit: "min", label: "TIEMPO TOTAL")
+            summaryItem(value: "\(selectedDayActivities.count)", unit: "total", label: "ACTIVIDADES")
+            summaryItem(value: "\(train)", unit: train == 1 ? "entreno" : "entrenos", label: "ENTRENOS")
+            summaryItem(value: "\(other)", unit: "otras", label: "FC / OTROS")
+            summaryItem(value: "\(dayMin)", unit: "min", label: "TIEMPO")
             Spacer()
         }
         .padding(.horizontal, WH.Spacing.md)
@@ -224,7 +482,7 @@ struct WorkoutsView: View {
             Image(systemName: "sparkles")
                 .font(.system(size: 11))
                 .foregroundStyle(WH.Color.textSecondary.opacity(0.6))
-            Text("Detectados automáticamente a partir de tu frecuencia cardíaca. Toca uno para clasificarlo.")
+            Text("Detectadas por tu frecuencia cardíaca — entrenos, picos matutinos y otras subidas de FC.")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -232,37 +490,31 @@ struct WorkoutsView: View {
         .padding(.horizontal, WH.Spacing.md)
     }
 
-    private var workoutList: some View {
-        VStack(spacing: 1) {
-            ForEach(workouts) { workout in
-                NavigationLink(destination: WorkoutDetailView(workout: workout, labelStore: labelStore)) {
-                    workoutRow(workout)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .background(WH.Color.surface,
-                    in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
-        .padding(.horizontal, WH.Spacing.md)
-    }
-
     private func workoutRow(_ w: Workout) -> some View {
         let type = labelStore.effectiveType(for: w)
+        let activityType = labelStore.activityOnlyType(for: w)
+        let cat = assessment(for: w).category
+        let isActivityOnly = labelStore.isDismissed(w.id)
         return HStack(spacing: WH.Spacing.sm) {
-            Image(systemName: type?.symbol ?? "bolt.fill")
+            Image(systemName: type?.symbol ?? activityType?.symbol ?? listIcon(for: w, category: cat))
                 .font(.system(size: 15))
-                .foregroundStyle(type != nil ? WH.Color.strainBlue : WH.Color.textSecondary)
+                .foregroundStyle(rowIconColor(type: type, activityType: activityType, category: cat, isActivityOnly: isActivityOnly, w: w))
                 .frame(width: 22)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(type?.displayName ?? rowDate(w.startTs))
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .foregroundStyle(WH.Color.textPrimary)
-                Text(type != nil ? "\(rowDate(w.startTs)) · \(rowTime(w.startTs))" : rowTime(w.startTs))
+                HStack(spacing: WH.Spacing.xs) {
+                    Text(rowTitle(w, type: type, activityType: activityType, category: cat, isActivityOnly: isActivityOnly))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(WH.Color.textPrimary)
+                    if isOnSelectedDay(w.startTs) {
+                        dayKindBadge(training: isTrainingBout(w))
+                    }
+                }
+                Text(rowSubtitle(w, type: type, activityType: activityType, category: cat))
                     .font(.system(size: 12))
                     .foregroundStyle(WH.Color.textSecondary)
             }
-            .frame(width: 120, alignment: .leading)
+            .frame(minWidth: 120, alignment: .leading)
 
             Text(formatDuration(w.durationS))
                 .font(.system(size: 13, weight: .medium, design: .rounded))
@@ -290,6 +542,71 @@ struct WorkoutsView: View {
         }
         .padding(.horizontal, WH.Spacing.md)
         .padding(.vertical, WH.Spacing.sm)
+    }
+
+    private func dayKindBadge(training: Bool) -> some View {
+        Text(training ? "Entreno" : "FC")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(training ? WH.Color.strainBlue : WH.Color.recoveryYellow)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(
+                (training ? WH.Color.strainBlue : WH.Color.recoveryYellow).opacity(0.15),
+                in: Capsule()
+            )
+    }
+
+    private func rowTitle(_ w: Workout, type: ActivityType?, activityType: ActivityType?,
+                          category: BoutCategory, isActivityOnly: Bool) -> String {
+        if let title = labelStore.displayTitle(for: w) { return title }
+        if let type { return type.displayName }
+        if let activityType { return activityType.displayName }
+        if isHighPeakSpike(w) {
+            return "Pico de FC · \(rowTime(w.startTs))"
+        }
+        if isActivityOnly { return "Actividad · \(rowTime(w.startTs))" }
+        switch category {
+        case .likelyWorkout: return rowDate(w.startTs)
+        case .hrSpike:       return "Pico de FC · \(rowTime(w.startTs))"
+        case .dailyRoutine:  return "Rutina · \(rowTime(w.startTs))"
+        case .lifeActivity:  return "Actividad · \(rowTime(w.startTs))"
+        }
+    }
+
+    private func rowSubtitle(_ w: Workout, type: ActivityType?, activityType: ActivityType?,
+                             category: BoutCategory) -> String {
+        let time = rowTime(w.startTs)
+        let peak = w.peakHr >= 120 ? " · pico \(w.peakHr) lpm" : ""
+        if type != nil || activityType != nil { return "\(time)\(peak)" }
+        if labelStore.isDismissed(w.id) {
+            return "\(time)\(peak) · no entreno"
+        }
+        return "\(time) · \(formatDuration(w.durationS))\(peak)"
+    }
+
+    private func isHighPeakSpike(_ w: Workout) -> Bool {
+        w.peakHr >= 150 && (w.strain ?? 0) < 7
+    }
+
+    private func listIcon(for w: Workout, category: BoutCategory) -> String {
+        if isHighPeakSpike(w) { return "waveform.path.ecg" }
+        return category.icon
+    }
+
+    private func rowIconColor(type: ActivityType?, activityType: ActivityType?,
+                              category: BoutCategory, isActivityOnly: Bool, w: Workout) -> Color {
+        if type != nil { return WH.Color.strainBlue }
+        if isHighPeakSpike(w) { return WH.Color.recoveryYellow }
+        if isActivityOnly || activityType != nil { return WH.Color.textSecondary }
+        return categoryColor(category)
+    }
+
+    private func categoryColor(_ cat: BoutCategory) -> Color {
+        switch cat {
+        case .likelyWorkout: return WH.Color.strainBlue
+        case .hrSpike:       return WH.Color.recoveryYellow
+        case .dailyRoutine:  return WH.Color.stressHigh
+        case .lifeActivity:  return WH.Color.textSecondary
+        }
     }
 
     private func strainBadge(_ strain: Double?) -> some View {
@@ -320,17 +637,114 @@ struct WorkoutsView: View {
             Image(systemName: "figure.run.circle")
                 .font(.system(size: 40, weight: .light))
                 .foregroundStyle(WH.Color.textSecondary)
-            Text("Aún no se detectan entrenamientos")
+            Text(isViewingToday
+                 ? "Sin actividad detectada hoy todavía"
+                 : "Sin actividad detectada este día")
                 .font(.system(size: 17, weight: .semibold, design: .rounded))
                 .foregroundStyle(WH.Color.textPrimary)
-            Text("Los entrenamientos se detectan automáticamente a partir de tu frecuencia cardíaca. Desliza hacia abajo para actualizar.")
+            Text("Las actividades se detectan a partir de tu frecuencia cardíaca. Desliza hacia abajo para actualizar.")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, WH.Spacing.xl)
+            Button { showDayEditor = true } label: {
+                Text("Definir entreno del día")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(WH.Color.strainBlue)
+                    .padding(.horizontal, WH.Spacing.md)
+                    .padding(.vertical, WH.Spacing.sm)
+                    .background(WH.Color.strainBlue.opacity(0.15), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, WH.Spacing.sm)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, WH.Spacing.xxl)
+    }
+
+    // MARK: - Day workout card
+
+    private var dayWorkoutCard: some View {
+        let resolved = resolvedDayWorkout
+        return Button { showDayEditor = true } label: {
+            VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+                HStack {
+                    Text("TU ENTRENO")
+                        .font(WH.Font.cardTitle)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .tracking(1.2)
+                    Spacer()
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(WH.Color.strainBlue)
+                }
+
+                if let type = resolved.activityType {
+                    HStack(spacing: WH.Spacing.sm) {
+                        Image(systemName: resolved.crossfitStyle?.icon ?? type.symbol)
+                            .font(.system(size: 20))
+                            .foregroundStyle(WH.Color.strainBlue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(dayWorkoutTitle(resolved))
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(WH.Color.textPrimary)
+                            if let primary = resolved.primary {
+                                Text("\(rowTime(primary.startTs)) · \(formatDuration(primary.durationS))")
+                                    .font(WH.Font.caption)
+                                    .foregroundStyle(WH.Color.textSecondary)
+                            }
+                        }
+                        Spacer()
+                    }
+                } else if resolved.primary != nil {
+                    HStack(spacing: WH.Spacing.sm) {
+                        Image(systemName: "questionmark.circle")
+                            .font(.system(size: 20))
+                            .foregroundStyle(WH.Color.textSecondary)
+                        Text("Actividad detectada — toca para clasificar")
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
+                            .foregroundStyle(WH.Color.textSecondary)
+                        Spacer()
+                    }
+                } else {
+                    Text("Toca para definir qué entrenaste hoy")
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
+
+                if !resolved.blocksDone.isEmpty {
+                    HStack(spacing: WH.Spacing.xs) {
+                        ForEach(resolved.blocksDone, id: \.self) { kind in
+                            Text(kind.displayName)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(WH.Color.strainBlue)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(WH.Color.strainBlue.opacity(0.12), in: Capsule())
+                        }
+                    }
+                }
+
+                if let note = resolved.note {
+                    Text(note)
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(WH.Spacing.md)
+            .background(WH.Color.surface,
+                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+            .padding(.horizontal, WH.Spacing.md)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func dayWorkoutTitle(_ resolved: ResolvedDayWorkout) -> String {
+        guard let type = resolved.activityType else { return "Sin clasificar" }
+        if type == .crossfit, let style = resolved.crossfitStyle, style != .regular {
+            return "\(type.displayName) · \(style.displayName)"
+        }
+        return type.displayName
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -351,22 +765,76 @@ struct WorkoutsView: View {
 
     // MARK: - Data
 
-    private var todayStrain: Double? {
-        let fmt = DateFormatter()
-        fmt.calendar = Calendar(identifier: .gregorian)
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        fmt.dateFormat = "yyyy-MM-dd"
-        let today = fmt.string(from: Date())
-        return weekRows.first { $0.day == today }?.strain ?? metrics.today?.strain
+    private var recoveryPercentForSelectedDay: Int? {
+        let daily: DailyMetric?
+        if isViewingToday {
+            daily = metrics.today
+                ?? weekRows.first { $0.day == MetricsRepository.localDayString(for: selectedDate) }
+        } else {
+            daily = selectedDayMetric
+                ?? weekRows.first { $0.day == MetricsRepository.localDayString(for: selectedDate) }
+        }
+        return TodayMetricHelpers.recoveryPercent(
+            sleep: isViewingToday ? metrics.lastNight : nil,
+            daily: daily,
+            sleepNights: sleepNights
+        ).map { Int($0.percent.rounded()) }
+    }
+
+    private var selectedDayStrain: Double? {
+        let key = MetricsRepository.localDayString(for: selectedDate)
+        var strain = weekRows.first(where: { $0.day == key })?.strain
+        if strain == nil || strain == 0 {
+            if isViewingToday, metrics.today?.day == key, let t = metrics.today?.strain, t > 0 {
+                strain = t
+            } else if selectedDayMetric?.day == key, let s = selectedDayMetric?.strain, s > 0 {
+                strain = s
+            }
+        }
+        if strain == nil || strain == 0 {
+            if let peak = selectedDayActivities.compactMap(\.strain).max(), peak > 0 {
+                return peak
+            }
+        }
+        return strain
     }
 
     private func reload() async {
         errorMessage = nil
+        await metrics.refresh()
+        sleepNights = await metrics.sleepNightCount()
         let (from, to) = dateRange(daysBack: 30)
         workouts = await metrics.workouts(from: from, to: to)
-        let (weekFrom, weekTo) = dateRange(daysBack: 7)
-        weekRows = await metrics.daily(fromDay: weekFrom, toDay: weekTo)
+        await reloadWeekRows()
+        await reloadSelectedDay()
         if isLoading { isLoading = false }
+    }
+
+    private func reloadWeekRows() async {
+        weekRows = await metrics.dailyLastDays(7)
+    }
+
+    private func reloadSelectedDay() async {
+        if isViewingToday {
+            selectedDayMetric = nil
+        } else {
+            let day = MetricsRepository.localDayString(for: selectedDate)
+            selectedDayMetric = await metrics.dailyMetric(forDay: day)
+        }
+        let resting = restingHr(for: selectedDate)
+        workouts = await metrics.supplementHRElevations(
+            in: workouts,
+            for: selectedDate,
+            restingHr: resting
+        )
+    }
+
+    private func restingHr(for day: Date) -> Int? {
+        let key = MetricsRepository.utcDayString(for: day)
+        if isViewingToday {
+            return weekRows.first { $0.day == key }?.restingHr ?? metrics.today?.restingHr
+        }
+        return selectedDayMetric?.restingHr ?? weekRows.first { $0.day == key }?.restingHr
     }
 
     private func dateRange(daysBack: Int) -> (from: String, to: String) {

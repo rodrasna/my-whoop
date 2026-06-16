@@ -21,6 +21,7 @@ struct TrendChartCard: View {
     let kind: MetricKind
     let points: [TrendPoint]
     let latestLabel: String     // pre-formatted display string for latest value
+    var titleOverride: String? = nil
     let onSelectDay: (String) -> Void
 
     @State private var selected: TrendPoint? = nil
@@ -31,7 +32,7 @@ struct TrendChartCard: View {
             // Header: tappable → MetricDetailView
             NavigationLink(destination: MetricDetailView(kind: kind)) {
                 HStack(alignment: .lastTextBaseline) {
-                    Text(kind.title.uppercased())
+                    Text((titleOverride ?? kind.title).uppercased())
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)

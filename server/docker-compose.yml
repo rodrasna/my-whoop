@@ -36,6 +36,9 @@ services:
       - WHOOP_API_KEY=${WHOOP_API_KEY}
       - WHOOP_DB_DSN=postgresql://${WHOOP_DB_USER:-whoop}:${WHOOP_DB_PASSWORD}@whoop-db:5432/${WHOOP_DB_NAME:-whoop}
       - WHOOP_RAW_ROOT=/data/raw
+      - SUGARWOD_EMAIL=${SUGARWOD_EMAIL:-}
+      - SUGARWOD_PASSWORD=${SUGARWOD_PASSWORD:-}
+      - SUGARWOD_TRACK=${SUGARWOD_TRACK:-}
       - TZ=${TZ:-UTC}
     volumes:
       - ${DATA_ROOT}/whoop/raw:/data/raw

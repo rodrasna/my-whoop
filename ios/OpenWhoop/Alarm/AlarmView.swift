@@ -45,6 +45,7 @@ struct AlarmView: View {
     @State private var wakeByDate: Date = AlarmView.todayAt(hour: 7, minute: 0)
     /// Controla la alerta de pulsera desconectada.
     @State private var showDisconnectedAlert = false
+    @State private var armError: String?
 
     var body: some View {
         NavigationStack {
@@ -77,10 +78,9 @@ struct AlarmView: View {
                 wakeByMinute = comps.minute ?? wakeByMinute
             }
             .alert("Pulsera no conectada", isPresented: $showDisconnectedAlert) {
-                Button("Armar de todos modos", role: .destructive) { setAlarm() }
-                Button("Cancelar", role: .cancel) {}
+                Button("Entendido", role: .cancel) {}
             } message: {
-                Text("La alarma se programa en la pulsera y no sonará si no la conectas antes de armarla.")
+                Text("Conecta la pulsera en la pestaña Dispositivo y espera unos segundos antes de programar la alarma.")
             }
         }
     }
@@ -163,6 +163,20 @@ struct AlarmView: View {
     private var statusSection: some View {
         Section {
             VStack(alignment: .leading, spacing: WH.Spacing.xs) {
+                if let armError {
+                    Text(armError)
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.recoveryYellow)
+                }
+                if !live.state.connected {
+                    Text("Pulsera desconectada — la alarma no se puede programar.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.recoveryYellow)
+                } else if !live.canArmStrapAlarm {
+                    Text("Conectando con la pulsera…")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
                 if alarmEnabled, armedEpoch > 0 {
                     let fireDate = Date(timeIntervalSince1970: armedEpoch)
                     HStack(spacing: WH.Spacing.xs) {
@@ -245,27 +259,27 @@ struct AlarmView: View {
     /// Comprueba si la pulsera está conectada antes de armar.
     /// Si no lo está, muestra una alerta de advertencia; si sí, arma directamente.
     private func armAlarmOrWarn() {
-        if live.state.connected {
-            setAlarm()
-        } else {
+        armError = nil
+        guard live.state.connected else {
             showDisconnectedAlert = true
+            return
         }
+        guard live.canArmStrapAlarm else {
+            armError = "Espera a que termine la conexión con la pulsera (unos segundos)."
+            return
+        }
+        setAlarm()
     }
 
     private func setAlarm() {
         let fireDate = nextOccurrence(hour: wakeByHour, minute: wakeByMinute)
+        guard live.armStrapAlarm(at: fireDate, smartWake: smartWakeEnabled, leadMinutes: smartWakeLeadMin) else {
+            armError = "No se pudo programar. Comprueba que la pulsera está conectada."
+            return
+        }
         alarmEnabled = true
         armedEpoch   = fireDate.timeIntervalSince1970
-        // armStrapAlarm returns the shared BLEManager so SmartAlarmController can hold it weakly.
-        let ble = live.armStrapAlarm(at: fireDate)
-        // Wire up smart-wake if enabled (SmartAlarmController arms itself in the window)
-        if smartWakeEnabled {
-            SmartAlarmController.shared.schedule(
-                wakeBy: fireDate,
-                leadMinutes: smartWakeLeadMin,
-                ble: ble
-            )
-        }
+        armError     = nil
     }
 
     private func disableAlarm() {

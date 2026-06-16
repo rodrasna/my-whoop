@@ -16,6 +16,7 @@ struct SleepView: View {
     @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
     @State private var weekNights: [CachedSleepSession] = []
     @State private var showingAlarm = false
+    @State private var stageBaselines = BaselineCalculator.StagePercents()
 
     // Alarm state read from UserDefaults for the summary card.
     @AppStorage(AlarmKeys.enabled)    private var alarmEnabled   = false
@@ -73,6 +74,15 @@ struct SleepView: View {
     private func reloadLocal() async {
         detail = await metrics.sleepDetail()
         weekNights = await metrics.sevenNightSleepWake(nights: 7)
+        let cal = Calendar(identifier: .gregorian)
+        let fmt = DateFormatter()
+        fmt.calendar = cal
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd"
+        let today = Date()
+        let from = cal.date(byAdding: .day, value: -30, to: today) ?? today
+        let rows = await metrics.daily(fromDay: fmt.string(from: from), toDay: fmt.string(from: today))
+        stageBaselines = BaselineCalculator.stagePercents(from: rows)
     }
 
     // MARK: - Loading
@@ -99,6 +109,8 @@ struct SleepView: View {
 
                 // 1. Headline — efficiency hero + total duration
                 headlineSection
+
+                sleepQualityCard
 
                 // 2. Hypnogram
                 if let session = detail?.session {
@@ -162,7 +174,42 @@ struct SleepView: View {
             return nil
         }()
 
-        let totalMinutes: Double? = {
+        return VStack(spacing: WH.Spacing.sm) {
+            if let score = efficiencyPct {
+                SleepPerformanceRing(scorePercent: score)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, WH.Spacing.sm)
+            } else {
+                Text("Sin datos de anoche")
+                    .font(WH.Font.caption)
+                    .foregroundStyle(WH.Color.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, WH.Spacing.xl)
+            }
+
+            if let session = session {
+                Text(formatTime(session.startTs) + " → " + formatTime(session.endTs))
+                    .font(.system(size: 13, weight: .medium, design: .default))
+                    .fontWidth(.condensed)
+                    .foregroundStyle(WH.Color.textSecondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    // MARK: - Sub-métricas de sueño (tarjeta bajo el anillo, estilo WHOOP)
+
+    private var sleepQualityCard: some View {
+        let session = detail?.session
+        let daily = detail?.daily
+
+        let efficiencyPct: Double? = {
+            if let e = session?.efficiency, e > 0 { return e * 100 }
+            if let e = daily?.efficiency, e > 0 { return e * 100 }
+            return nil
+        }()
+
+        let asleepMin: Double? = {
             if let m = daily?.totalSleepMin, m > 0 { return m }
             if let s = session {
                 let d = Double(s.endTs - s.startTs) / 60
@@ -171,63 +218,46 @@ struct SleepView: View {
             return nil
         }()
 
-        return VStack(spacing: WH.Spacing.md) {
-            if let score = efficiencyPct {
-                SleepPerformanceRing(scorePercent: score)
-                    .frame(maxWidth: .infinity)
-            }
+        let needMin: Double = 480
+        var rows: [SleepQualityMetricsCard.Row] = []
 
-            HStack(alignment: .bottom, spacing: WH.Spacing.md) {
-                // Big efficiency percentage
-                VStack(alignment: .leading, spacing: WH.Spacing.xs) {
-                    Text("EFICIENCIA DEL SUEÑO")
-                        .font(WH.Font.cardTitle)
-                        .foregroundStyle(WH.Color.textSecondary)
-                        .tracking(1.2)
-
-                    HStack(alignment: .lastTextBaseline, spacing: WH.Spacing.xs) {
-                        Text(efficiencyPct.map { "\(Int($0.rounded()))" } ?? "—")
-                            .font(WH.Font.metricHero(size: 64))
-                            .foregroundStyle(efficiencyPct != nil ? WH.Color.textPrimary : WH.Color.textSecondary)
-                            .monospacedDigit()
-                        if efficiencyPct != nil {
-                            Text("%")
-                                .font(WH.Font.unit)
-                                .foregroundStyle(WH.Color.textSecondary)
-                        }
-                    }
-                }
-
-                Spacer()
-
-                // Total time asleep (right-aligned)
-                VStack(alignment: .trailing, spacing: WH.Spacing.xs) {
-                    Text("TIEMPO DORMIDO")
-                        .font(WH.Font.cardTitle)
-                        .foregroundStyle(WH.Color.textSecondary)
-                        .tracking(1.2)
-
-                    Text(totalMinutes.map { formatMinutes($0) } ?? "—")
-                        .font(WH.Font.metricLarge(size: 32))
-                        .foregroundStyle(totalMinutes != nil ? WH.Color.textPrimary : WH.Color.textSecondary)
-                        .monospacedDigit()
-                }
-            }
-            .padding(WH.Spacing.md)
-            .background(WH.Color.surface,
-                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
-
-            // Bed/wake time subtitle
-            if let session = session {
-                HStack {
-                    Text(formatTime(session.startTs) + " → " + formatTime(session.endTs))
-                        .font(WH.Font.caption)
-                        .foregroundStyle(WH.Color.textSecondary)
-                    Spacer()
-                }
-                .padding(.horizontal, WH.Spacing.xs)
-            }
+        if let eff = efficiencyPct {
+            let band: String = {
+                if eff >= 85 { return "Óptimo" }
+                if eff >= 70 { return "Suficiente" }
+                return "Deficiente"
+            }()
+            rows.append(.init(
+                id: "efficiency",
+                title: "Eficiencia del sueño",
+                value: "\(Int(eff.rounded()))%",
+                context: "Tiempo dormido vs. tiempo en cama · \(band)",
+                gaugeValue: eff
+            ))
         }
+
+        if let slept = asleepMin {
+            let pct = min(100, slept / needMin * 100)
+            rows.append(.init(
+                id: "hours",
+                title: "Horas vs. lo necesario",
+                value: "\(formatMinutes(slept)) / 8h",
+                context: pct >= 100 ? "Cumples el objetivo de sueño" : "Faltan \(formatMinutes(max(0, needMin - slept))) para 8h",
+                gaugeValue: pct
+            ))
+        }
+
+        if let reg = SleepQualityBuilder.regularityScore(from: weekNights) {
+            rows.append(.init(
+                id: "regularity",
+                title: "Regularidad del sueño",
+                value: "\(Int(reg.rounded()))%",
+                context: SleepQualityBuilder.regularityContext(score: reg, nights: weekNights.count),
+                gaugeValue: reg
+            ))
+        }
+
+        return SleepQualityMetricsCard(rows: rows)
     }
 
     // MARK: - 3. Stage breakdown + sleep stats
@@ -280,22 +310,31 @@ struct SleepView: View {
             guard let tib = timeInBedMin, tib > 0 else { return nil }
             return max(0, tib - asleepMin)
         }()
-        // % denominator: total across all stages (incl. awake) when derived from the
-        // hypnogram; else time in bed; else the asleep sum.
-        let totalForPct: Double = {
-            let stagesTotal = asleepMin + (awakeMin ?? 0)
-            if stagesTotal > 0 { return stagesTotal }
-            return (timeInBedMin ?? 0) > 0 ? timeInBedMin! : max(asleepMin, 1)
+        // Sleep stages as % of time asleep (TST, AASM-style). Awake as % of time in bed.
+        let sleepStageDenom = max(asleepMin, 1)
+        let awakeDenom: Double = {
+            let tib = timeInBedMin ?? (asleepMin + (awakeMin ?? 0))
+            return max(tib, 1)
         }()
 
         return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             sectionHeader("Etapas del sueño")
+            Text("Hoy vs. 30 días anteriores · % del tiempo dormido")
+                .font(WH.Font.caption)
+                .foregroundStyle(WH.Color.textSecondary)
+            Text("Estimación con pulsera (sin EEG). El sueño profundo es la etapa menos fiable.")
+                .font(.system(size: 11))
+                .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
 
             VStack(spacing: WH.Spacing.md) {
-                stageRow(label: "Despierto",       color: WH.Color.stageWake,  minutes: awakeMin, totalMin: totalForPct)
-                stageRow(label: "Ligero",          color: WH.Color.stageLight, minutes: light,    totalMin: totalForPct)
-                stageRow(label: "Sueño profundo (SWS)",  color: WH.Color.stageDeep,  minutes: deep,     totalMin: totalForPct)
-                stageRow(label: "REM",             color: WH.Color.stageRem,   minutes: rem,      totalMin: totalForPct)
+                stageRow(label: "Despierto", color: WH.Color.stageWake, minutes: awakeMin,
+                         totalMin: awakeDenom, typicalPct: stageBaselines.awake)
+                stageRow(label: "Ligero", color: WH.Color.stageLight, minutes: light,
+                         totalMin: sleepStageDenom, typicalPct: stageBaselines.light)
+                stageRow(label: "Sueño profundo (SWS)", color: WH.Color.stageDeep, minutes: deep,
+                         totalMin: sleepStageDenom, typicalPct: stageBaselines.deep)
+                stageRow(label: "REM", color: WH.Color.stageRem, minutes: rem,
+                         totalMin: sleepStageDenom, typicalPct: stageBaselines.rem)
             }
             .padding(WH.Spacing.md)
             .background(WH.Color.surface,
@@ -312,7 +351,8 @@ struct SleepView: View {
 
     /// One sleep-stage row, official-style: ringed dot + name + colored % pill + duration,
     /// with a proportional progress bar underneath.
-    private func stageRow(label: String, color: Color, minutes: Double?, totalMin: Double) -> some View {
+    private func stageRow(label: String, color: Color, minutes: Double?,
+                          totalMin: Double, typicalPct: Double?) -> some View {
         let frac: Double = (minutes != nil && totalMin > 0) ? min(1, minutes! / totalMin) : 0
         let pct: Int? = (minutes != nil && totalMin > 0) ? Int((frac * 100).rounded()) : nil
         return VStack(spacing: WH.Spacing.xs) {
@@ -344,10 +384,21 @@ struct SleepView: View {
                     StripedBarBackground()
                         .clipShape(Capsule())
                         .frame(height: 8)
-                    Capsule().fill(color).frame(width: max(0, geo.size.width * CGFloat(frac)), height: 8)
+                    if let typical = typicalPct {
+                        let lo = max(0, (typical - 8) / 100)
+                        let hi = min(1, (typical + 8) / 100)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(WH.Color.textSecondary.opacity(0.55),
+                                    style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .frame(width: geo.size.width * CGFloat(hi - lo), height: 12)
+                            .offset(x: geo.size.width * CGFloat(lo), y: -2)
+                    }
+                    Capsule()
+                        .fill(color)
+                        .frame(width: max(0, geo.size.width * CGFloat(frac)), height: 8)
                 }
             }
-            .frame(height: 8)
+            .frame(height: 12)
         }
     }
 

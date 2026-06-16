@@ -35,9 +35,9 @@ recovery.py — Resting HR during sleep + an HRV-driven recovery score (0–100)
   night"), scale 0.12 (empirical for a plausible ±2σ band).
 
   Cold-start: if the HRV baseline is not yet usable (fewer than MIN_NIGHTS_SEED=4
-  valid nights), the function returns ``None``.  Callers may substitute
-  RECOVERY_POPULATION_MEAN (58.0) as a fallback, but should flag it clearly.
-  Returning ``None`` is more honest than returning a fake score.
+  valid nights), we fall back to population anchors (POPULATION_HRV_MEAN /
+  POPULATION_RHR_MEAN) so the user still sees a provisional score — similar to
+  WHOOP's first nights.  Score is APPROXIMATE until the personal baseline matures.
 
 ------------------------------------------------------------------------------
 Input shapes
@@ -106,6 +106,11 @@ LOGISTIC_Z0: float = -0.20
 
 #: WHOOP-published population-average recovery (% ).  Used as the cold-start fallback.
 RECOVERY_POPULATION_MEAN: float = 58.0
+
+#: Population anchors for provisional recovery (< MIN_NIGHTS_SEED personal baseline).
+#: Chosen so a typical night near these values → Z≈0 → ~58% recovery.
+POPULATION_HRV_MEAN: float = 55.0   # ms RMSSD
+POPULATION_RHR_MEAN: float = 58.0   # bpm
 
 #: Recovery band thresholds matching WHOOP color scheme (doc 03 §1.3).
 BAND_RED_MAX: float = 34.0    # Red  : [0, 34)
@@ -217,6 +222,18 @@ def _z_score(value: float, mean: float, spread: float) -> float:
     return (value - mean) / sigma
 
 
+def recovery_is_provisional(baselines: Any) -> bool:
+    """True when the score used population anchors (personal HRV baseline < 4 nights)."""
+    if baselines is None:
+        return False
+    raw: Any
+    if isinstance(baselines, Mapping):
+        raw = baselines.get("hrv")
+    else:
+        raw = getattr(baselines, "hrv", None)
+    return isinstance(raw, BaselineState) and not raw.usable
+
+
 def recovery_band(score: float) -> str:
     """Return the WHOOP-style color band for a given recovery score [0, 100]."""
     if score < BAND_RED_MAX:
@@ -239,9 +256,8 @@ def recovery_score(
 ) -> float | None:
     """Z-score + logistic recovery score in [0, 100].  APPROXIMATE.
 
-    Returns ``None`` when the HRV baseline is not yet usable (cold-start: fewer
-    than MIN_NIGHTS_SEED valid nights).
-    Callers may use ``RECOVERY_POPULATION_MEAN`` (58.0) as a fallback.
+    Returns ``None`` when there is no usable signal (no baselines at all and no
+    sleep metrics to score).
 
     Parameters
     ----------
@@ -263,24 +279,27 @@ def recovery_score(
     Returns
     -------
     float | None
-        Recovery in [0, 100], or ``None`` if the HRV baseline is not trusted.
+        Recovery in [0, 100], or ``None`` if there is nothing to score.
     """
-    # ── Extract baseline mean + spread per metric ─────────────────────────────
-    b_hrv_mean, b_hrv_spread = _extract_baseline_mean_spread(baselines, "hrv")
-    b_rhr_mean, b_rhr_spread = _extract_baseline_mean_spread(baselines, "resting_hr")
-    b_resp_mean, b_resp_spread = _extract_baseline_mean_spread(baselines, "resp")
-
-    # ── Cold-start gate ───────────────────────────────────────────────────────
-    # Check if the HRV baseline (dominant driver) comes from a BaselineState.
-    # If it does and it's not yet trusted, return None (too few nights of data).
+    # ── Resolve baseline means (personal or population fallback) ─────────────
     raw_hrv_val: Any
     if isinstance(baselines, Mapping):
         raw_hrv_val = baselines.get("hrv")
     else:
-        raw_hrv_val = getattr(baselines, "hrv", None)
+        raw_hrv_val = getattr(baselines, "hrv", None) if baselines is not None else None
 
-    if isinstance(raw_hrv_val, BaselineState) and not raw_hrv_val.usable:
-        return None  # cold-start: HRV baseline not yet usable (< MIN_NIGHTS_SEED valid nights)
+    use_population = isinstance(raw_hrv_val, BaselineState) and not raw_hrv_val.usable
+
+    if use_population:
+        b_hrv_mean = POPULATION_HRV_MEAN
+        b_hrv_spread = METRIC_CFG["hrv"].floor_spread
+        b_rhr_mean = POPULATION_RHR_MEAN
+        b_rhr_spread = METRIC_CFG["resting_hr"].floor_spread
+        b_resp_mean, b_resp_spread = None, None
+    else:
+        b_hrv_mean, b_hrv_spread = _extract_baseline_mean_spread(baselines, "hrv")
+        b_rhr_mean, b_rhr_spread = _extract_baseline_mean_spread(baselines, "resting_hr")
+        b_resp_mean, b_resp_spread = _extract_baseline_mean_spread(baselines, "resp")
 
     # ── Compute per-metric z-scores (recovery-favorable direction) ────────────
     # z_hrv:  higher HRV  → more positive (good)

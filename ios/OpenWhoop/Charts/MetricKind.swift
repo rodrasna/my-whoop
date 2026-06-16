@@ -2,25 +2,23 @@ import SwiftUI
 import Charts
 import WhoopStore
 
-// MARK: - MetricKind
-// Enum that drives chart style, color, data extraction, and formatting for every
-// supported metric. Adding a new metric only requires a new case here.
-
 enum MetricKind: String, Identifiable {
     case recovery
     case hrv
     case rhr
     case strain
     case sleepDuration
-    /// High-resolution 1 Hz HR stream. Stream-backed — NOT a daily aggregate.
-    /// Excluded from the daily Trends card loop; has its own HeartRateDetailView.
     case rawHR
+    case spo2
+    case respRate
+    case skinTempDev
 
     var id: String { rawValue }
 
-    /// The ordered list of daily-aggregate metrics shown in the Trends cards loop.
-    /// rawHR is intentionally excluded — it is stream-backed, not daily.
     static let dailyCases: [MetricKind] = [.recovery, .hrv, .rhr, .strain, .sleepDuration]
+
+    /// Nightly health signals shown on the Salud tab (7-day trend cards).
+    static let healthSignalCases: [MetricKind] = [.hrv, .rhr, .spo2, .respRate, .skinTempDev]
 
     // MARK: Display
 
@@ -32,6 +30,24 @@ enum MetricKind: String, Identifiable {
         case .strain:        return "Day Strain"
         case .sleepDuration: return "Sleep"
         case .rawHR:         return "Heart Rate"
+        case .spo2:          return "SpO₂"
+        case .respRate:      return "Respiratory Rate"
+        case .skinTempDev:   return "Skin Temperature"
+        }
+    }
+
+    /// Spanish UI label (app copy is mostly es).
+    var localizedTitle: String {
+        switch self {
+        case .recovery:      return "Recuperación"
+        case .hrv:           return "VFC"
+        case .rhr:           return "FC en reposo"
+        case .strain:        return "Esfuerzo"
+        case .sleepDuration: return "Sueño"
+        case .rawHR:         return "Frecuencia cardíaca"
+        case .spo2:          return "SpO₂"
+        case .respRate:      return "Frecuencia respiratoria"
+        case .skinTempDev:   return "Temperatura cutánea"
         }
     }
 
@@ -43,6 +59,9 @@ enum MetricKind: String, Identifiable {
         case .strain:        return "/ 21"
         case .sleepDuration: return "hr"
         case .rawHR:         return "bpm"
+        case .spo2:          return "%"
+        case .respRate:      return "rpm"
+        case .skinTempDev:   return "Δ°C"
         }
     }
 
@@ -50,12 +69,15 @@ enum MetricKind: String, Identifiable {
 
     var color: Color {
         switch self {
-        case .recovery:      return WH.Color.recoveryGreen   // band-colored at runtime
+        case .recovery:      return WH.Color.recoveryGreen
         case .hrv:           return WH.Color.teal
         case .rhr:           return WH.Color.textPrimary
         case .strain:        return WH.Color.strainBlue
         case .sleepDuration: return WH.Color.sleepPurple
         case .rawHR:         return WH.Color.recoveryRed
+        case .spo2:          return WH.Color.sleepBlue
+        case .respRate:      return WH.Color.textPrimary
+        case .skinTempDev:   return WH.Color.recoveryYellow
         }
     }
 
@@ -65,7 +87,7 @@ enum MetricKind: String, Identifiable {
 
     var markType: MarkType {
         switch self {
-        case .recovery, .hrv, .rhr, .rawHR: return .line
+        case .recovery, .hrv, .rhr, .rawHR, .spo2, .respRate, .skinTempDev: return .line
         case .strain, .sleepDuration: return .bar
         }
     }
@@ -76,19 +98,21 @@ enum MetricKind: String, Identifiable {
         switch self {
         case .recovery: return 0...100
         case .strain:   return 0...21
-        case .rawHR:    return nil   // auto-scaled — HR range varies widely
+        case .spo2:     return 90...100
+        case .rawHR:    return nil
         default:        return nil
         }
     }
 
-    // MARK: Recovery banding
-
-    /// Whether to draw the green/yellow/red zone bands behind the chart.
     var hasRecoveryBands: Bool { self == .recovery }
-
-    /// Whether this kind is stream-backed (not a daily aggregate).
-    /// Stream-backed kinds must not be passed to value(from:).
     var isStreamBacked: Bool { self == .rawHR }
+
+    var supportsDetailView: Bool {
+        switch self {
+        case .rawHR: return false
+        default: return true
+        }
+    }
 
     // MARK: Value formatting
 
@@ -100,10 +124,12 @@ enum MetricKind: String, Identifiable {
         case .strain:        return String(format: "%.1f", value)
         case .sleepDuration: return String(format: "%.1f hr", value)
         case .rawHR:         return String(format: "%.0f bpm", value)
+        case .spo2:          return String(format: "%.1f%%", value)
+        case .respRate:      return String(format: "%.1f rpm", value)
+        case .skinTempDev:   return String(format: "%+.2f Δ°C", value)
         }
     }
 
-    /// Short value-only label (no unit) for axis labels and stat strip.
     func formatShort(_ value: Double) -> String {
         switch self {
         case .recovery:      return String(format: "%.0f", value)
@@ -112,19 +138,20 @@ enum MetricKind: String, Identifiable {
         case .strain:        return String(format: "%.1f", value)
         case .sleepDuration: return String(format: "%.1f", value)
         case .rawHR:         return String(format: "%.0f", value)
+        case .spo2:          return String(format: "%.1f", value)
+        case .respRate:      return String(format: "%.1f", value)
+        case .skinTempDev:   return String(format: "%+.2f", value)
         }
     }
 
     // MARK: Data extraction from DailyMetric
 
-    /// Returns nil for stream-backed kinds (rawHR) so they are never accidentally
-    /// included in the daily Trends card loop. Call-sites on .rawHR should use hrSeries instead.
     func value(from metric: DailyMetric) -> Double? {
         guard !isStreamBacked else { return nil }
         switch self {
         case .recovery:
             guard let r = metric.recovery else { return nil }
-            return r * 100    // stored as 0–1 fraction → display 0–100
+            return r * 100
         case .hrv:
             return metric.avgHrv
         case .rhr:
@@ -133,9 +160,15 @@ enum MetricKind: String, Identifiable {
             return metric.strain
         case .sleepDuration:
             guard let m = metric.totalSleepMin, m > 0 else { return nil }
-            return m / 60.0   // minutes → hours
+            return m / 60.0
+        case .spo2:
+            return metric.spo2Pct
+        case .respRate:
+            return metric.respRateBpm
+        case .skinTempDev:
+            return metric.skinTempDevC
         case .rawHR:
-            return nil   // unreachable: guarded by isStreamBacked above
+            return nil
         }
     }
 }

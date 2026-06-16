@@ -26,7 +26,7 @@ struct MetricDetailView: View {
         }
     }
 
-    @State private var selectedRange: TimeRange = .month
+    @State private var selectedRange: TimeRange = .week
     @State private var allRows: [DailyMetric] = []
     @State private var isLoading = true
     @State private var selected: TrendPoint? = nil
@@ -117,7 +117,7 @@ struct MetricDetailView: View {
                 scrollContent
             }
         }
-        .navigationTitle(kind.title)
+        .navigationTitle(kind.localizedTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .task { await loadAll() }
@@ -134,7 +134,7 @@ struct MetricDetailView: View {
         VStack(spacing: WH.Spacing.md) {
             ProgressView()
                 .tint(WH.Color.textSecondary)
-            Text("Loading \(kind.title)…")
+            Text("Cargando \(kind.localizedTitle)…")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
         }
@@ -180,13 +180,13 @@ struct MetricDetailView: View {
 
     private func statsStrip(_ s: Stats) -> some View {
         HStack(spacing: 0) {
-            statCell(label: "AVG",    value: kind.formatShort(s.avg),        unit: kind.unit)
+            statCell(label: "PROM",   value: kind.formatShort(s.avg),    unit: kind.unit)
             Divider().frame(height: 32).background(WH.Color.separator)
-            statCell(label: "MIN",    value: kind.formatShort(s.min),        unit: kind.unit)
+            statCell(label: "MÍN",   value: kind.formatShort(s.min),    unit: kind.unit)
             Divider().frame(height: 32).background(WH.Color.separator)
-            statCell(label: "MAX",    value: kind.formatShort(s.max),        unit: kind.unit)
+            statCell(label: "MÁX",   value: kind.formatShort(s.max),    unit: kind.unit)
             Divider().frame(height: 32).background(WH.Color.separator)
-            statCell(label: "LATEST", value: s.latest.map { kind.formatShort($0) } ?? "—", unit: kind.unit)
+            statCell(label: "ÚLTIMO", value: s.latest.map { kind.formatShort($0) } ?? "—", unit: kind.unit)
         }
         .padding(WH.Spacing.md)
         .background(WH.Color.surface,
@@ -262,6 +262,7 @@ struct MetricDetailView: View {
                 showAxes: true,
                 showSelection: true,
                 yDomain: nil,
+                xDomain: xScaleDomain,
                 selected: $selected
             )
             .frame(height: 260)
