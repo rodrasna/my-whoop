@@ -91,4 +91,24 @@ final class MobilityStoresTests: XCTestCase {
         XCTAssertEqual(store.entries.filter { $0.dayKey == key && $0.sessionKind == .daily }.count, 1)
         XCTAssertEqual(store.entry(dayKey: key, sessionKind: .daily)?.exerciseCount, 12)
     }
+
+    func testMergeFromServerKeepsNewerCompletion() {
+        let store = MobilityCompletionStore(defaults: completionDefaults)
+        let key = "2026-06-18"
+        let older = MobilityCompletionEntry(
+            dayKey: key,
+            sessionKind: .preWorkout,
+            exerciseCount: 6,
+            completedAt: Date(timeIntervalSince1970: 100)
+        )
+        let newer = MobilityCompletionEntry(
+            dayKey: key,
+            sessionKind: .preWorkout,
+            exerciseCount: 10,
+            completedAt: Date(timeIntervalSince1970: 200)
+        )
+        store.mergeFromServer([older])
+        store.mergeFromServer([newer])
+        XCTAssertEqual(store.entry(dayKey: key, sessionKind: .preWorkout)?.exerciseCount, 10)
+    }
 }

@@ -15,6 +15,33 @@ struct WorkoutDayPlan: Codable, Equatable {
     var prvnReferenceDayKey: String?
     /// Sin entreno hoy — movilidad y recomendaciones usan descanso.
     var isRestDay: Bool = false
+    /// Última escritura (local o servidor) para merge multi-device.
+    var savedAt: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case primaryWorkoutId, activityType, crossfitStyle, blocksDone, note
+        case prvnReferenceDayKey, isRestDay, savedAt
+    }
+
+    init(
+        primaryWorkoutId: String? = nil,
+        activityType: ActivityType? = nil,
+        crossfitStyle: CrossFitSessionStyle? = nil,
+        blocksDone: [ProgramBlockKind] = [],
+        note: String? = nil,
+        prvnReferenceDayKey: String? = nil,
+        isRestDay: Bool = false,
+        savedAt: TimeInterval? = nil
+    ) {
+        self.primaryWorkoutId = primaryWorkoutId
+        self.activityType = activityType
+        self.crossfitStyle = crossfitStyle
+        self.blocksDone = blocksDone
+        self.note = note
+        self.prvnReferenceDayKey = prvnReferenceDayKey
+        self.isRestDay = isRestDay
+        self.savedAt = savedAt
+    }
 
     var hasContent: Bool {
         primaryWorkoutId != nil
@@ -59,12 +86,33 @@ final class WorkoutDayPlanStore: ObservableObject {
     }
 
     func set(_ plan: WorkoutDayPlan?, for dayKey: String) {
-        if let plan, plan.hasContent {
+        if var plan, plan.hasContent {
+            plan.savedAt = Date().timeIntervalSince1970
             plans[dayKey] = plan
         } else {
             plans.removeValue(forKey: dayKey)
         }
         persist()
+    }
+
+    /// Fusiona planes del servidor: gana la copia con `savedAt` más reciente.
+    func mergeFromServer(_ remote: [(dayKey: String, plan: WorkoutDayPlan)]) {
+        guard !remote.isEmpty else { return }
+        var changed = false
+        for item in remote {
+            let remoteSaved = item.plan.savedAt ?? 0
+            if let local = plans[item.dayKey] {
+                let localSaved = local.savedAt ?? 0
+                if remoteSaved > localSaved {
+                    plans[item.dayKey] = item.plan
+                    changed = true
+                }
+            } else if item.plan.hasContent {
+                plans[item.dayKey] = item.plan
+                changed = true
+            }
+        }
+        if changed { persist() }
     }
 
     /// Resuelve el entreno del día combinando plan manual, etiquetas y PRVN.

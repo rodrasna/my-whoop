@@ -72,5 +72,10 @@ fixtures/soak_*.bin
 server/.env
 .env
 
+# Server local dev / ML artifacts (not image inputs)
+server/ingest/.venv/
+server/packages/whoop-protocol/build/
+server/sleep-model/
+
 # Context export for external dev tools (local-only, not versioned)
 docs/context/

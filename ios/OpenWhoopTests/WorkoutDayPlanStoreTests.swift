@@ -78,4 +78,17 @@ final class WorkoutDayPlanStoreTests: XCTestCase {
         XCTAssertEqual(resolved.blocksDone, [.warmup, .metcon])
         XCTAssertFalse(resolved.isUserDefined)
     }
+
+    func testMergeFromServerKeepsNewerCopy() {
+        let store = WorkoutDayPlanStore()
+        store.mergeFromServer([
+            (dayKey: "2026-06-15", plan: WorkoutDayPlan(note: "local", savedAt: 100)),
+        ])
+        store.mergeFromServer([
+            (dayKey: "2026-06-15", plan: WorkoutDayPlan(note: "remote", savedAt: 200)),
+            (dayKey: "2026-06-16", plan: WorkoutDayPlan(isRestDay: true, savedAt: 50)),
+        ])
+        XCTAssertEqual(store.plan(for: "2026-06-15")?.note, "remote")
+        XCTAssertTrue(store.plan(for: "2026-06-16")?.isRestDay == true)
+    }
 }

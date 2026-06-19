@@ -846,7 +846,6 @@ final class ServerSync {
             "device": deviceId,
             "day": dayKey,
             "blocks_done": plan.blocksDone.map(\.rawValue),
-            "saved_at": Date().timeIntervalSince1970,
         ]
         if let id = plan.primaryWorkoutId { body["primary_workout_id"] = id }
         if let t = plan.activityType { body["activity_type"] = t.rawValue }
@@ -858,8 +857,81 @@ final class ServerSync {
         } else {
             body["prvn_reference_day_key"] = NSNull()
         }
+        body["saved_at"] = plan.savedAt ?? Date().timeIntervalSince1970
         guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return false }
         return await put(path: "/v1/day-plan", body: bodyData)
+    }
+
+    /// GET /v1/day-plans?device=&from=&to=
+    func getDayPlans(from: String, to: String) async -> [(dayKey: String, plan: WorkoutDayPlan)]? {
+        let path = "/v1/day-plans?device=\(deviceId)&from=\(from)&to=\(to)"
+        guard let data = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return nil
+        }
+        return arr.compactMap { row -> (String, WorkoutDayPlan)? in
+            guard let dayKey = row["day_key"] as? String,
+                  let plan = Self.parseDayPlanRow(row) else { return nil }
+            return (dayKey, plan)
+        }
+    }
+
+    /// GET /v1/mobility-completions?device=&from=&to=
+    func getMobilityCompletions(from: String, to: String) async -> [MobilityCompletionEntry]? {
+        let path = "/v1/mobility-completions?device=\(deviceId)&from=\(from)&to=\(to)"
+        guard let data = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return nil
+        }
+        return arr.compactMap { Self.parseMobilityCompletionRow($0) }
+    }
+
+    static func parseDayPlanRow(_ row: [String: Any]) -> WorkoutDayPlan? {
+        let blocksRaw = row["blocks_done"] as? [String] ?? []
+        let blocks = blocksRaw.compactMap { ProgramBlockKind(rawValue: $0) }
+        let activityType = (row["activity_type"] as? String).flatMap { ActivityType(rawValue: $0) }
+        let style = (row["crossfit_style"] as? String).flatMap { CrossFitSessionStyle(rawValue: $0) }
+        let savedAt = parseTimestamp(row["saved_at"])
+        let plan = WorkoutDayPlan(
+            primaryWorkoutId: row["primary_workout_id"] as? String,
+            activityType: activityType,
+            crossfitStyle: style,
+            blocksDone: blocks,
+            note: row["note"] as? String,
+            prvnReferenceDayKey: row["prvn_reference_day_key"] as? String,
+            isRestDay: row["is_rest_day"] as? Bool ?? false,
+            savedAt: savedAt
+        )
+        return plan.hasContent ? plan : nil
+    }
+
+    static func parseMobilityCompletionRow(_ row: [String: Any]) -> MobilityCompletionEntry? {
+        guard let dayKey = row["day_key"] as? String,
+              let kindRaw = row["session_kind"] as? String,
+              let kind = MobilitySessionKind(rawValue: kindRaw),
+              let count = row["exercise_count"] as? Int,
+              let completedAt = parseTimestamp(row["completed_at"]) else {
+            return nil
+        }
+        return MobilityCompletionEntry(
+            dayKey: dayKey,
+            sessionKind: kind,
+            exerciseCount: count,
+            completedAt: Date(timeIntervalSince1970: completedAt)
+        )
+    }
+
+    private static func parseTimestamp(_ value: Any?) -> TimeInterval? {
+        if let n = value as? Double { return n }
+        if let n = value as? Int { return TimeInterval(n) }
+        if let s = value as? String {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = iso.date(from: s) { return d.timeIntervalSince1970 }
+            iso.formatOptions = [.withInternetDateTime]
+            if let d = iso.date(from: s) { return d.timeIntervalSince1970 }
+        }
+        return nil
     }
 
     /// DELETE /v1/day-plan — clear manual plan when user removes all fields.

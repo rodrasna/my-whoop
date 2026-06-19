@@ -164,6 +164,7 @@ final class MetricsRepository: ObservableObject {
             await maybeAutoSyncPRVNProgram()
             await loadPRVNProgramFromServerIfNeeded()
             await syncSleepCheckIns()
+            await syncCoachContext()
         }
 
         // Morning recovery notification: fire once per calendar day when recovery is available.
@@ -347,6 +348,23 @@ final class MetricsRepository: ObservableObject {
     func pushMobilityCompletion(_ entry: MobilityCompletionEntry) async {
         await ensureOpen()
         _ = await serverSync?.putMobilityCompletion(entry)
+    }
+
+    /// Pull day plans + mobility completions from server and merge into local stores.
+    func syncCoachContext() async {
+        await ensureOpen()
+        guard let serverSync else { return }
+        let cal = Calendar.current
+        let to = Date()
+        guard let from = cal.date(byAdding: .day, value: -30, to: to) else { return }
+        let fromDay = Self.localDayString(for: from, calendar: cal)
+        let toDay = Self.localDayString(for: to, calendar: cal)
+        if let remotePlans = await serverSync.getDayPlans(from: fromDay, to: toDay) {
+            WorkoutDayPlanStore.shared.mergeFromServer(remotePlans)
+        }
+        if let remoteMobility = await serverSync.getMobilityCompletions(from: fromDay, to: toDay) {
+            MobilityCompletionStore.shared.mergeFromServer(remoteMobility)
+        }
     }
 
     /// Fetch training coach report (GET cache, else POST compute). Best-effort.

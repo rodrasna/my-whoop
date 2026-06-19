@@ -760,6 +760,41 @@ final class ServerSyncTests: XCTestCase {
         XCTAssertEqual(json["blocks_done"] as? [String], ["metcon"])
     }
 
+    func testParseDayPlanRowWithTrainingContext() {
+        let row: [String: Any] = [
+            "day_key": "2026-06-16",
+            "primary_workout_id": NSNull(),
+            "activity_type": "crossfit",
+            "crossfit_style": "qualifier",
+            "blocks_done": ["metcon"],
+            "note": "Scaled",
+            "prvn_reference_day_key": "2026-06-14",
+            "is_rest_day": false,
+            "saved_at": 1_700_000_000.0,
+        ]
+        let plan = ServerSync.parseDayPlanRow(row)
+        XCTAssertEqual(plan?.prvnReferenceDayKey, "2026-06-14")
+        XCTAssertEqual(plan?.savedAt, 1_700_000_000.0)
+        XCTAssertEqual(plan?.blocksDone, [.metcon])
+    }
+
+    func testGetDayPlansDecodesResponse() async throws {
+        let body = """
+        [{"day_key":"2026-06-16","activity_type":"crossfit","blocks_done":["metcon"],
+          "is_rest_day":true,"note":"Rest","saved_at":1700000000}]
+        """
+        StubURLProtocol.reset(responses: ["/v1/day-plans": 200], bodies: ["/v1/day-plans": body])
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let rows = await sync.getDayPlans(from: "2026-06-16", to: "2026-06-16")
+        XCTAssertEqual(rows?.count, 1)
+        XCTAssertEqual(rows?.first?.dayKey, "2026-06-16")
+        XCTAssertTrue(rows?.first?.plan.isRestDay == true)
+    }
+
     func testDeleteDayPlanUsesDeleteMethod() async throws {
         StubURLProtocol.reset(responses: ["/v1/day-plan": 200], bodies: [:])
         let store = try await WhoopStore.inMemory()

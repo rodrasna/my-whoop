@@ -103,11 +103,20 @@ Manual tras deploy:
 1. Editar entreno en Actividad → `GET /v1/day-plans` muestra el día
 2. Completar rutina movilidad → `GET /v1/mobility-completions` muestra la sesión
 
-## Fuera de alcance (siguiente)
+## Sincronización bidireccional (2026-06-19)
 
-- Pull server → iOS (merge multi-device) — no necesario para coach unidireccional
-- `training_coach.py` + informes — task-09 Fase A
-- GET en `verify-server.sh` — opcional
+En cada `MetricsRepository.refresh()`:
+
+| Dirección | Qué |
+|-----------|-----|
+| iOS → servidor | Sin cambios (editor, rutina movilidad) |
+| Servidor → iOS | `syncCoachContext()` — últimos 30 días |
+
+Merge por `savedAt` (day-plan) y `completedAt` (movilidad). Gana la copia más reciente.
+
+Archivos: `ServerSync.getDayPlans`, `getMobilityCompletions`, `WorkoutDayPlanStore.mergeFromServer`, `MobilityCompletionStore.mergeFromServer`.
+
+## Fuera de alcance (siguiente)
 
 ## Roadmap movilidad
 

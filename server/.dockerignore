@@ -1,0 +1,14 @@
+# Python package build artifacts (whoop-protocol local install)
+packages/whoop-protocol/build/
+packages/whoop-protocol/**/*.egg-info/
+packages/whoop-protocol/dist/
+
+# ML training artifacts — not used by the ingest image
+sleep-model/
+
+# Local Python venv / caches — not needed in the ingest image
+ingest/.venv/
+ingest/.pytest_cache/
+**/__pycache__/
+**/*.pyc
+ingest/tests/

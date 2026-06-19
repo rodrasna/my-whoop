@@ -77,5 +77,29 @@ workouts=$(curl -fsS --max-time 30 \
 count=$(python3 -c "import json,sys; print(len(json.load(sys.stdin)))" <<<"$workouts" 2>/dev/null || echo "?")
 echo "  ${count} workout(s) hoy"
 
+echo "→ GET /v1/day-plans?device=${DEVICE}&from=${TODAY}&to=${TODAY}"
+day_plans_code=$(curl -sS -o /tmp/whoop-day-plans.json -w "%{http_code}" --max-time 15 \
+  "${BASE}/v1/day-plans?device=${DEVICE}&from=${TODAY}&to=${TODAY}" "${auth[@]}" || true)
+if [[ "$day_plans_code" == "200" ]]; then
+  plan_count=$(python3 -c "import json; print(len(json.load(open('/tmp/whoop-day-plans.json'))))" 2>/dev/null || echo "?")
+  echo "  OK — ${plan_count} day-plan(s) hoy"
+else
+  echo "  HTTP ${day_plans_code}" >&2
+  exit 1
+fi
+
+echo "→ POST /v1/coach/day?device=${DEVICE}&day=${TODAY}"
+coach_code=$(curl -sS -o /tmp/whoop-coach.json -w "%{http_code}" --max-time 30 -X POST \
+  "${BASE}/v1/coach/day?device=${DEVICE}&day=${TODAY}" "${auth[@]}" || true)
+if [[ "$coach_code" == "200" ]]; then
+  verdict=$(python3 -c "import json; r=json.load(open('/tmp/whoop-coach.json')); print((r.get('summary') or {}).get('verdict','?'))" 2>/dev/null || echo "?")
+  ctx=$(python3 -c "import json; r=json.load(open('/tmp/whoop-coach.json')); print('training_context' in r)" 2>/dev/null || echo "?")
+  echo "  OK — verdict=${verdict}, training_context=${ctx}"
+else
+  echo "  HTTP ${coach_code}" >&2
+  cat /tmp/whoop-coach.json 2>/dev/null || true
+  exit 1
+fi
+
 echo ""
 echo "Servidor OK para app iOS (device=${DEVICE})."

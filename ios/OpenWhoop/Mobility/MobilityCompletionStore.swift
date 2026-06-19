@@ -127,6 +127,25 @@ final class MobilityCompletionStore: ObservableObject {
         entries.sorted { $0.completedAt > $1.completedAt }.prefix(limit).map { $0 }
     }
 
+    /// Fusiona completados del servidor: gana la entrada con `completedAt` más reciente por (día, tipo).
+    func mergeFromServer(_ remote: [MobilityCompletionEntry]) {
+        guard !remote.isEmpty else { return }
+        var changed = false
+        for item in remote {
+            if let local = entry(dayKey: item.dayKey, sessionKind: item.sessionKind) {
+                if item.completedAt > local.completedAt {
+                    entries.removeAll { $0.dayKey == item.dayKey && $0.sessionKind == item.sessionKind }
+                    entries.append(item)
+                    changed = true
+                }
+            } else {
+                entries.append(item)
+                changed = true
+            }
+        }
+        if changed { persist() }
+    }
+
     func resetForTesting() {
         entries = []
         defaults.removeObject(forKey: Self.storageKey)

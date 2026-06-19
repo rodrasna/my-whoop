@@ -13,6 +13,7 @@ Lista ordenada. Cada ítem tiene su doc en `docs/mobility/NN-<slug>.md` con proc
 | 7 | Deploy servidor (ingest + PRVN cache estable) | ✅ Tooling + runbook | [07-server-deploy.md](07-server-deploy.md) |
 | 8 | Hardening preservación ejercicios en ingest | ✅ Hecho | [08-exercise-preservation.md](08-exercise-preservation.md) |
 | 9 | Sync day-plan + completados movilidad al servidor (coach) | ✅ Hecho | [09-server-sync-coach.md](09-server-sync-coach.md) |
+| 10 | Contexto entreno (PRVN ref, descanso) + imágenes movilidad + pull server | ✅ Hecho | [10-training-context-sync.md](10-training-context-sync.md) |
 
 ## Ya entregado (antes de este roadmap)
 
