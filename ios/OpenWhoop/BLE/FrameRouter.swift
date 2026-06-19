@@ -10,6 +10,9 @@ public final class FrameRouter {
     /// BLEManager wires this to a rate-limited requestSync(.strap). nil in pure/unit contexts.
     var onSyncTrigger: (() -> Void)?
 
+    /// Called when the strap pushes STRAP_DRIVEN_ALARM_* events. Wired by BLEManager.
+    var onFirmwareAlarmEvent: ((String) -> Void)?
+
     public init(state: LiveState) {
         self.state = state
     }
@@ -52,6 +55,9 @@ public final class FrameRouter {
             }
             if let ev = parsed.parsed["event"]?.stringValue {
                 state.lastEvent = ev
+                if ev.hasPrefix("STRAP_DRIVEN_ALARM") {
+                    onFirmwareAlarmEvent?(ev)
+                }
                 // Strap-pushed event = "I may have new data" → kick a (rate-limited) sync.
                 onSyncTrigger?()
                 // Belt-and-suspenders: a BLE_BONDED event confirms the link is bonded.

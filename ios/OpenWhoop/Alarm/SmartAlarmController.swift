@@ -89,8 +89,7 @@ final class SmartAlarmController {
         let delay       = windowOpens.timeIntervalSinceNow
 
         guard delay > 0 else {
-            // Window already open (alarm set for < leadMinutes from now); enter immediately.
-            enterWindow(wakeBy: wakeBy, windowDuration: Double(lead) * 60)
+            // Alarm is sooner than the smart-wake lead — skip high-freq; app/firmware buzz handles it.
             return
         }
 

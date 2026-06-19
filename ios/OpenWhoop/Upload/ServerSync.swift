@@ -302,18 +302,24 @@ final class ServerSync {
     /// once and then request `/v1/sleep` ONLY for the `day` values it returned — typically a handful.
     /// Idempotent: re-pulled sessions dedup on natural key (deviceId, startTs).
     func pullDerived() async {
+        _ = await pullDerivedWithStatus()
+    }
+
+    /// Like ``pullDerived()`` but returns whether `/v1/daily` succeeded.
+    @discardableResult
+    func pullDerivedWithStatus() async -> Bool {
         await pullDerivedWindow(days: ServerSync.derivedWindowDays)
     }
 
     /// Full-restore variant: pull derived over the wider `fullRestoreWindowDays` window so
     /// multi-year history is rebuilt, not just the recent 60-day incremental window.
     private func pullDerivedFull() async {
-        await pullDerivedWindow(days: ServerSync.fullRestoreWindowDays)
+        _ = await pullDerivedWindow(days: ServerSync.fullRestoreWindowDays)
     }
 
     /// Core derived-pull implementation. Pulls `/v1/daily` over a `days`-wide window ending now,
     /// then `/v1/sleep` for each day that has a daily metric row. Shared by incremental + restore.
-    private func pullDerivedWindow(days windowDays: Int) async {
+    private func pullDerivedWindow(days windowDays: Int) async -> Bool {
         let now = Date()
         let cal = Calendar(identifier: .gregorian)
         let fmt = DateFormatter()
@@ -321,12 +327,12 @@ final class ServerSync {
         fmt.timeZone = cal.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
 
-        guard let start = cal.date(byAdding: .day, value: -windowDays, to: now) else { return }
+        guard let start = cal.date(byAdding: .day, value: -windowDays, to: now) else { return false }
         let fromDay = fmt.string(from: cal.startOfDay(for: start))
         let toDay = fmt.string(from: cal.startOfDay(for: now))
 
         // /v1/daily over the window. This is the authoritative list of days WITH data.
-        guard let days = await getDaily(from: fromDay, to: toDay) else { return }
+        guard let days = await getDaily(from: fromDay, to: toDay) else { return false }
         if !days.isEmpty {
             try? await store.upsertDailyMetrics(days, deviceId: deviceId)
         }
@@ -338,6 +344,7 @@ final class ServerSync {
                 try? await store.upsertSleepSessions(sessions, deviceId: deviceId)
             }
         }
+        return true
     }
 
     private func getDaily(from: String, to: String) async -> [DailyMetric]? {
@@ -401,7 +408,8 @@ final class ServerSync {
                                       efficiency: dbl(r, "efficiency"),
                                       restingHr: int(r, "resting_hr") ?? int(r, "restingHr"),
                                       avgHrv: dbl(r, "avg_hrv") ?? dbl(r, "avgHrv"),
-                                      stagesJSON: stagesJSON)
+                                      stagesJSON: stagesJSON,
+                                      kind: (r["kind"] as? String) ?? "main")
         }
     }
 
@@ -424,10 +432,12 @@ final class ServerSync {
         }
         let workouts: [Workout] = arr.compactMap { r in
             guard let start = epoch(r, "start_ts") ?? epoch(r, "startTs"),
-                  let end   = epoch(r, "end_ts")   ?? epoch(r, "endTs"),
-                  let avgHr  = dbl(r, "avg_hr")    ?? dbl(r, "avgHr"),
-                  let peakHr = int(r, "peak_hr")   ?? int(r, "peakHr"),
-                  let durS   = int(r, "duration_s") ?? int(r, "durationS") else { return nil }
+                  let end   = epoch(r, "end_ts")   ?? epoch(r, "endTs") else { return nil }
+            let avgHr = dbl(r, "avg_hr") ?? dbl(r, "avgHr")
+            let peakHr = int(r, "peak_hr") ?? int(r, "peakHr")
+                ?? avgHr.map { Int($0.rounded()) }
+            let durS = int(r, "duration_s") ?? int(r, "durationS") ?? max(1, end - start)
+            guard let avgHr, let peakHr else { return nil }
             // Parse zone_time_pct: keys are strings "0"–"5"
             var zones: [Int: Double] = [:]
             if let zObj = r["zone_time_pct"] as? [String: Any] {
@@ -507,6 +517,112 @@ final class ServerSync {
         if let s = profile.sex       { body["sex"]         = s }
         guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return false }
         return await post(path: path, body: bodyData)
+    }
+
+    // MARK: - Sleep check-ins (subjective morning questionnaire)
+
+    /// GET /v1/sleep-check-ins?device=&from=&to=
+    func getSleepCheckIns(from: String, to: String) async -> [SleepCheckIn]? {
+        let path = "/v1/sleep-check-ins?device=\(deviceId)&from=\(from)&to=\(to)"
+        guard let data = await get(path: path),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return nil
+        }
+        return arr.compactMap { Self.parseSleepCheckInRow($0) }
+    }
+
+    /// POST /v1/sleep-check-in — upsert one morning questionnaire row.
+    func putSleepCheckIn(_ checkIn: SleepCheckIn) async -> Bool {
+        var body: [String: Any] = [
+            "device": deviceId,
+            "day_key": checkIn.dayKey,
+            "morning_feeling": checkIn.morningFeeling.rawValue,
+            "onset": checkIn.onset.rawValue,
+            "factors": checkIn.factors.map(\.rawValue).sorted(),
+            "saved_at": checkIn.savedAt.timeIntervalSince1970,
+        ]
+        if let note = checkIn.note { body["note"] = note }
+        if let r = checkIn.recoveryPct { body["recovery_pct"] = r }
+        if let e = checkIn.sleepEfficiencyPct { body["sleep_efficiency_pct"] = e }
+        if let t = checkIn.voiceTranscript { body["voice_transcript"] = t }
+        if let a = checkIn.analysis,
+           let analysisData = try? JSONEncoder().encode(a),
+           let analysisObj = try? JSONSerialization.jsonObject(with: analysisData) {
+            body["analysis"] = analysisObj
+        }
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        return await post(path: "/v1/sleep-check-in", body: bodyData)
+    }
+
+    /// POST /v1/sleep-check-in/analyze — estructura la transcripción y contrasta con métricas.
+    func analyzeSleepCheckIn(transcript: String,
+                             dayKey: String,
+                             recoveryPct: Double?,
+                             sleepEfficiencyPct: Double?) async -> SleepCheckInAnalyzeResult? {
+        var body: [String: Any] = [
+            "device": deviceId,
+            "day_key": dayKey,
+            "transcript": transcript,
+        ]
+        if let r = recoveryPct { body["recovery_pct"] = r }
+        if let e = sleepEfficiencyPct { body["sleep_efficiency_pct"] = e }
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        guard let data = await postForData(path: "/v1/sleep-check-in/analyze", body: bodyData) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(SleepCheckInAnalyzeResult.self, from: data)
+    }
+
+    static func parseSleepCheckInRow(_ row: [String: Any]) -> SleepCheckIn? {
+        guard let dayKey = row["day_key"] as? String,
+              let feelingRaw = int(row, "morning_feeling"),
+              let feeling = MorningFeeling(rawValue: feelingRaw),
+              let onsetRaw = row["onset"] as? String,
+              let onset = SleepOnset(rawValue: onsetRaw) else { return nil }
+
+        let factorRaw = (row["factors"] as? [String]) ?? []
+        let factors = Set(factorRaw.compactMap(SleepFactor.init(rawValue:)))
+        let note = row["note"] as? String
+
+        let savedAt: Date
+        if let savedStr = row["saved_at"] as? String, let d = parseEpoch(savedStr).map({ Date(timeIntervalSince1970: TimeInterval($0)) }) {
+            savedAt = d
+        } else if let n = row["saved_at"] as? NSNumber {
+            savedAt = Date(timeIntervalSince1970: n.doubleValue)
+        } else {
+            return nil
+        }
+
+        let recovery = (row["recovery_pct"] as? NSNumber)?.doubleValue
+        let efficiency = (row["sleep_efficiency_pct"] as? NSNumber)?.doubleValue
+        let voiceTranscript = row["voice_transcript"] as? String
+        let analysis = parseAnalysis(row["analysis"])
+
+        return SleepCheckIn(
+            dayKey: dayKey,
+            morningFeeling: feeling,
+            onset: onset,
+            factors: factors,
+            note: note,
+            savedAt: savedAt,
+            recoveryPct: recovery,
+            sleepEfficiencyPct: efficiency,
+            voiceTranscript: voiceTranscript,
+            analysis: analysis
+        )
+    }
+
+    private static func parseAnalysis(_ value: Any?) -> SleepCheckInAnalysis? {
+        let data: Data?
+        if let dict = value as? [String: Any] {
+            data = try? JSONSerialization.data(withJSONObject: dict)
+        } else if let str = value as? String, let d = str.data(using: .utf8) {
+            data = d
+        } else {
+            data = nil
+        }
+        guard let data else { return nil }
+        return try? JSONDecoder().decode(SleepCheckInAnalysis.self, from: data)
     }
 
     // MARK: - Raw HR series (downsampled, single request)
@@ -722,6 +838,92 @@ final class ServerSync {
         return await post(path: "/v1/backfill-workouts", body: bodyData)
     }
 
+    // MARK: - Coach sync (day plan + mobility)
+
+    /// PUT /v1/day-plan — upsert manual workout day plan for coach context.
+    func putDayPlan(dayKey: String, plan: WorkoutDayPlan) async -> Bool {
+        var body: [String: Any] = [
+            "device": deviceId,
+            "day": dayKey,
+            "blocks_done": plan.blocksDone.map(\.rawValue),
+            "saved_at": Date().timeIntervalSince1970,
+        ]
+        if let id = plan.primaryWorkoutId { body["primary_workout_id"] = id }
+        if let t = plan.activityType { body["activity_type"] = t.rawValue }
+        if let s = plan.crossfitStyle { body["crossfit_style"] = s.rawValue }
+        if let note = plan.note { body["note"] = note }
+        body["is_rest_day"] = plan.isRestDay
+        if let ref = plan.prvnReferenceDayKey {
+            body["prvn_reference_day_key"] = ref
+        } else {
+            body["prvn_reference_day_key"] = NSNull()
+        }
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        return await put(path: "/v1/day-plan", body: bodyData)
+    }
+
+    /// DELETE /v1/day-plan — clear manual plan when user removes all fields.
+    func deleteDayPlan(dayKey: String) async -> Bool {
+        let path = "/v1/day-plan?device=\(deviceId)&day=\(dayKey)"
+        return await delete(path: path)
+    }
+
+    /// POST /v1/mobility-completion — upsert one guided session completion.
+    func putMobilityCompletion(_ entry: MobilityCompletionEntry) async -> Bool {
+        let body: [String: Any] = [
+            "device": deviceId,
+            "day_key": entry.dayKey,
+            "session_kind": entry.sessionKind.rawValue,
+            "exercise_count": entry.exerciseCount,
+            "completed_at": entry.completedAt.timeIntervalSince1970,
+        ]
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        return await post(path: "/v1/mobility-completion", body: bodyData)
+    }
+
+    /// GET /v1/coach/day — cached deterministic report, nil if 404.
+    func getCoachReport(dayKey: String) async -> TrainingDayCoachReport? {
+        let path = "/v1/coach/day?device=\(deviceId)&day=\(dayKey)"
+        guard let data = await get(path: path) else { return nil }
+        return try? JSONDecoder().decode(TrainingDayCoachReport.self, from: data)
+    }
+
+    /// POST /v1/coach/day — compute + cache report.
+    func computeCoachReport(dayKey: String) async -> TrainingDayCoachReport? {
+        let path = "/v1/coach/day?device=\(deviceId)&day=\(dayKey)"
+        guard let url = URL(string: path, relativeTo: config.baseURL)
+                     ?? URL(string: config.baseURL.absoluteString + path) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else { return nil }
+            return try? JSONDecoder().decode(TrainingDayCoachReport.self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    /// GET cached report or POST to compute if missing.
+    func fetchCoachReport(dayKey: String) async -> TrainingDayCoachReport? {
+        if let cached = await getCoachReport(dayKey: dayKey) { return cached }
+        return await computeCoachReport(dayKey: dayKey)
+    }
+
+    /// POST /v1/coach/explain — optional LLM narrative (rate-limited server-side).
+    func explainCoachReport(dayKey: String, includeNote: Bool) async -> CoachNarrativeResponse? {
+        let body: [String: Any] = [
+            "device": deviceId,
+            "day": dayKey,
+            "include_note": includeNote,
+        ]
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        guard let data = await postForData(path: "/v1/coach/explain", body: bodyData) else { return nil }
+        return try? JSONDecoder().decode(CoachNarrativeResponse.self, from: data)
+    }
+
     // MARK: - HTTP helpers
 
     /// Perform a GET with the Bearer header. Returns the body Data only on 2xx; nil otherwise.
@@ -789,6 +991,42 @@ final class ServerSync {
     /// Perform a POST with Bearer auth + JSON body. Returns true on 2xx, false otherwise.
     private func post(path: String, body: Data) async -> Bool {
         await postForData(path: path, body: body) != nil
+    }
+
+    /// PUT with JSON body. Returns true on 2xx.
+    private func put(path: String, body: Data) async -> Bool {
+        guard let url = URL(string: path, relativeTo: config.baseURL)
+                     ?? URL(string: config.baseURL.absoluteString + path) else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else { return false }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// DELETE. Returns true on 2xx.
+    private func delete(path: String) async -> Bool {
+        guard let url = URL(string: path, relativeTo: config.baseURL)
+                     ?? URL(string: config.baseURL.absoluteString + path) else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else { return false }
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

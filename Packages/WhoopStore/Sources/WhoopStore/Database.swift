@@ -151,6 +151,11 @@ extension WhoopStore {
                 t.add(column: "respRateBpm", .double)
             }
         }
+        migrator.registerMigration("v8") { db in
+            try db.alter(table: "sleepSession") { t in
+                t.add(column: "kind", .text).defaults(to: "main")
+            }
+        }
         return migrator
     }
 }

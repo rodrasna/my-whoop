@@ -14,6 +14,9 @@ from pydantic import BaseModel, Field
 
 from . import db, ingest, read, store
 from .analysis import daily
+from .analysis import training_coach
+from .analysis import training_coach_explain
+from .analysis.sleep_check_in import analyze_transcript, maybe_refine_with_llm
 from .config import load_config
 from .sugarwod import service as sugarwod_service
 from .sugarwod.client import SugarWODError
@@ -284,6 +287,17 @@ def get_sleep(device: str, date: str):
         return read.query_sleep(conn, device, day)
 
 
+@app.delete("/v1/sleep/session", dependencies=[Depends(require_auth)])
+def delete_sleep_session(device: str, start_ts: float):
+    """Remove one erroneous sleep session (PK = device + start_ts epoch seconds)."""
+    with psycopg.connect(cfg.db_dsn) as conn:
+        deleted = store.delete_sleep_session(conn, device, start_ts)
+        conn.commit()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="sleep session not found")
+    return {"deleted": deleted, "device": device, "start_ts": start_ts}
+
+
 # ── Profile endpoints ─────────────────────────────────────────────────────────
 
 _VALID_SEX = {"male", "female", "nonbinary"}
@@ -326,6 +340,94 @@ def upsert_profile(body: ProfileBody):
         conn.commit()
         row = read.query_profile(conn, body.device)
     return row
+
+
+# ── Sleep check-in (subjective morning questionnaire) ─────────────────────────
+
+_VALID_ONSET = {"easy", "normal", "hard"}
+
+
+class SleepCheckInBody(BaseModel):
+    device: str
+    day_key: str
+    morning_feeling: int = Field(ge=1, le=5)
+    onset: str
+    factors: list[str] = []
+    note: str | None = None
+    saved_at: float  # epoch seconds
+    recovery_pct: float | None = None
+    sleep_efficiency_pct: float | None = None
+    voice_transcript: str | None = None
+    analysis: dict | None = None
+
+
+class SleepCheckInAnalyzeBody(BaseModel):
+    device: str
+    day_key: str
+    transcript: str = Field(min_length=1)
+    recovery_pct: float | None = None
+    sleep_efficiency_pct: float | None = None
+
+
+@app.get("/v1/sleep-check-ins", dependencies=[Depends(require_auth)])
+def get_sleep_check_ins(device: str,
+                        from_: str = Query(..., alias="from"),
+                        to: str = Query(..., alias="to")):
+    """Subjective sleep check-ins over inclusive [from, to] day_key range."""
+    start, end = _parse_date(from_), _parse_date(to)
+    with psycopg.connect(cfg.db_dsn) as conn:
+        rows = read.query_sleep_check_ins(conn, device, start, end)
+    return rows
+
+
+@app.post("/v1/sleep-check-in", dependencies=[Depends(require_auth)])
+def post_sleep_check_in(body: SleepCheckInBody):
+    """Upsert one morning check-in for a wake day."""
+    onset = body.onset.lower().strip()
+    if onset not in _VALID_ONSET:
+        raise HTTPException(
+            status_code=422,
+            detail=f"onset must be one of {sorted(_VALID_ONSET)}; got {body.onset!r}",
+        )
+    row = {
+        "day_key": body.day_key,
+        "morning_feeling": body.morning_feeling,
+        "onset": onset,
+        "factors": body.factors,
+        "note": body.note,
+        "saved_at": body.saved_at,
+        "recovery_pct": body.recovery_pct,
+        "sleep_efficiency_pct": body.sleep_efficiency_pct,
+        "voice_transcript": body.voice_transcript,
+        "analysis": body.analysis,
+    }
+    with psycopg.connect(cfg.db_dsn) as conn:
+        store.ensure_device(conn, body.device)
+        store.upsert_sleep_check_in(conn, body.device, row)
+        conn.commit()
+        rows = read.query_sleep_check_ins(conn, body.device, body.day_key, body.day_key)
+    return rows[0] if rows else row
+
+
+@app.post("/v1/sleep-check-in/analyze", dependencies=[Depends(require_auth)])
+def analyze_sleep_check_in(body: SleepCheckInAnalyzeBody):
+    """Parse voice/text transcript; contrast subjective feeling with strap metrics."""
+    transcript = body.transcript.strip()
+    if not transcript:
+        raise HTTPException(status_code=422, detail="transcript is required")
+    try:
+        base = analyze_transcript(
+            transcript,
+            recovery_pct=body.recovery_pct,
+            sleep_efficiency_pct=body.sleep_efficiency_pct,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    refined = maybe_refine_with_llm(base, transcript)
+    payload = refined.as_dict()
+    payload["voice_transcript"] = transcript
+    payload["day_key"] = body.day_key
+    return payload
 
 
 # ── PRVN / SugarWOD programming ─────────────────────────────────────────────
@@ -401,6 +503,204 @@ def get_stress(device: str,
             "quality": r.get("quality"),
         })
     return out
+
+
+# ── Coach sync (day plan + mobility completions) ─────────────────────────────
+
+_VALID_ACTIVITY_TYPES = frozenset({
+    "crossfit", "running", "cycling", "strength", "hiit", "walking",
+    "swimming", "rowing", "yoga", "cardio", "other",
+})
+
+_VALID_CROSSFIT_STYLES = frozenset({
+    "regular", "qualifier", "benchmark", "hero", "skill", "partner",
+})
+
+
+class DayPlanBody(BaseModel):
+    device: str
+    day: str
+    primary_workout_id: str | None = None
+    activity_type: str | None = None
+    crossfit_style: str | None = None
+    blocks_done: list[str] = []
+    note: str | None = None
+    prvn_reference_day_key: str | None = None
+    is_rest_day: bool = False
+    saved_at: float | None = None
+
+
+class MobilityCompletionBody(BaseModel):
+    device: str
+    day_key: str
+    session_kind: str
+    exercise_count: int = Field(ge=0)
+    completed_at: float
+
+
+@app.put("/v1/day-plan", dependencies=[Depends(require_auth)])
+def put_day_plan(body: DayPlanBody):
+    """Upsert the manual workout day plan for coach context."""
+    if body.activity_type is not None and body.activity_type not in _VALID_ACTIVITY_TYPES:
+        raise HTTPException(status_code=422, detail=f"invalid activity_type: {body.activity_type!r}")
+    if body.crossfit_style is not None and body.crossfit_style not in _VALID_CROSSFIT_STYLES:
+        raise HTTPException(status_code=422, detail=f"invalid crossfit_style: {body.crossfit_style!r}")
+    if body.prvn_reference_day_key is not None:
+        try:
+            _dt.date.fromisoformat(body.prvn_reference_day_key)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"invalid prvn_reference_day_key: {body.prvn_reference_day_key!r}",
+            )
+    bad_blocks = [b for b in body.blocks_done if b not in read._VALID_PROGRAM_BLOCK_KINDS]
+    if bad_blocks:
+        raise HTTPException(status_code=422, detail=f"invalid blocks_done: {bad_blocks}")
+    saved_at = body.saved_at if body.saved_at is not None else time.time()
+    row = {
+        "day_key": body.day,
+        "primary_workout_id": body.primary_workout_id,
+        "activity_type": body.activity_type,
+        "crossfit_style": body.crossfit_style,
+        "blocks_done": body.blocks_done,
+        "note": body.note,
+        "prvn_reference_day_key": body.prvn_reference_day_key,
+        "is_rest_day": body.is_rest_day,
+        "saved_at": saved_at,
+    }
+    with psycopg.connect(cfg.db_dsn) as conn:
+        store.ensure_device(conn, body.device)
+        store.upsert_workout_day_plan(conn, body.device, row)
+        conn.commit()
+        rows = read.query_workout_day_plans(conn, body.device, body.day, body.day)
+    return rows[0] if rows else row
+
+
+@app.delete("/v1/day-plan", dependencies=[Depends(require_auth)])
+def delete_day_plan(device: str, day: str):
+    """Remove a manual day plan (user cleared the editor)."""
+    with psycopg.connect(cfg.db_dsn) as conn:
+        store.delete_workout_day_plan(conn, device, day)
+        conn.commit()
+    return {"status": "deleted", "device": device, "day": day}
+
+
+@app.get("/v1/day-plans", dependencies=[Depends(require_auth)])
+def get_day_plans(device: str,
+                  from_: str = Query(..., alias="from"),
+                  to: str = Query(..., alias="to")):
+    """Manual day plans over inclusive [from, to] day_key range (YYYY-MM-DD)."""
+    start, end = _parse_date(from_), _parse_date(to)
+    with psycopg.connect(cfg.db_dsn) as conn:
+        return read.query_workout_day_plans(conn, device, start, end)
+
+
+@app.post("/v1/mobility-completion", dependencies=[Depends(require_auth)])
+def post_mobility_completion(body: MobilityCompletionBody):
+    """Upsert one guided mobility session completion."""
+    if body.session_kind not in read._VALID_MOBILITY_SESSION_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"session_kind must be one of {sorted(read._VALID_MOBILITY_SESSION_KINDS)}; "
+                   f"got {body.session_kind!r}",
+        )
+    row = {
+        "day_key": body.day_key,
+        "session_kind": body.session_kind,
+        "exercise_count": body.exercise_count,
+        "completed_at": body.completed_at,
+    }
+    with psycopg.connect(cfg.db_dsn) as conn:
+        store.ensure_device(conn, body.device)
+        store.upsert_mobility_completion(conn, body.device, row)
+        conn.commit()
+        rows = read.query_mobility_completions(conn, body.device, body.day_key, body.day_key)
+    return rows[0] if rows else row
+
+
+@app.get("/v1/mobility-completions", dependencies=[Depends(require_auth)])
+def get_mobility_completions(device: str,
+                             from_: str = Query(..., alias="from"),
+                             to: str = Query(..., alias="to")):
+    """Mobility completions over inclusive [from, to] day_key range (YYYY-MM-DD)."""
+    start, end = _parse_date(from_), _parse_date(to)
+    with psycopg.connect(cfg.db_dsn) as conn:
+        return read.query_mobility_completions(conn, device, start, end)
+
+
+# ── Training coach (deterministic report) ─────────────────────────────────────
+
+@app.get("/v1/coach/day", dependencies=[Depends(require_auth)])
+def get_coach_day(device: str, day: str):
+    """Cached training-day coach report (JSON). 404 if not computed yet."""
+    with psycopg.connect(cfg.db_dsn) as conn:
+        row = read.query_coach_report(conn, device, day)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no coach report for this day; POST to compute")
+    return row["report"]
+
+
+@app.post("/v1/coach/day", dependencies=[Depends(require_auth)])
+def post_coach_day(device: str, day: str):
+    """Compute and cache a deterministic training-day coach report."""
+    _parse_date(day)  # validate YYYY-MM-DD
+    with psycopg.connect(cfg.db_dsn) as conn:
+        store.ensure_device(conn, device)
+        report = training_coach.compute_day_report(conn, device, day)
+        store.upsert_coach_report(conn, device, day, report)
+        conn.commit()
+    return report
+
+
+class CoachExplainBody(BaseModel):
+    device: str
+    day: str
+    include_note: bool = False
+
+
+@app.post("/v1/coach/explain", dependencies=[Depends(require_auth)])
+def post_coach_explain(body: CoachExplainBody):
+    """Generate a short Spanish narrative from a cached coach report (LLM if configured).
+
+    Rate limit: one LLM call per device per UTC calendar day. Cached narrative is
+    returned on repeat requests for the same day. User notes are only sent when
+    ``include_note`` is true (iOS Settings toggle).
+    """
+    _parse_date(body.day)
+    usage_day = _dt.datetime.now(_dt.timezone.utc).date()
+    with psycopg.connect(cfg.db_dsn) as conn:
+        row = read.query_coach_report(conn, body.device, body.day)
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail="no coach report for this day; POST /v1/coach/day first",
+            )
+        if row.get("narrative"):
+            return {"narrative": row["narrative"], "source": "cached", "day": body.day}
+
+        prior = store.get_coach_explain_usage(conn, body.device, usage_day)
+        if prior is not None and prior != body.day:
+            raise HTTPException(
+                status_code=429,
+                detail="coach explain rate limit: one LLM narrative per UTC day",
+            )
+
+        note = None
+        if body.include_note:
+            plans = read.query_workout_day_plans(conn, body.device, body.day, body.day)
+            if plans:
+                note = plans[0].get("note")
+
+        narrative, source = training_coach_explain.explain_report(
+            row["report"],
+            include_note=body.include_note,
+            note=note,
+        )
+        store.set_coach_narrative(conn, body.device, body.day, narrative)
+        if source == "llm":
+            store.record_coach_explain_usage(conn, body.device, usage_day, body.day)
+        conn.commit()
+    return {"narrative": narrative, "source": source, "day": body.day}
 
 
 # ── Backfill workouts endpoint ────────────────────────────────────────────────

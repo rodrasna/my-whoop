@@ -69,5 +69,7 @@ def clean_db(timescale_dsn):
     with psycopg.connect(timescale_dsn, autocommit=True) as c:
         c.execute("TRUNCATE devices, raw_batches, hr_samples, rr_intervals, events, battery, "
                   "spo2_samples, skin_temp_samples, resp_samples, gravity_samples, "
-                  "sleep_sessions, exercise_sessions, daily_metrics, profile CASCADE")
+                  "sleep_sessions, exercise_sessions, daily_metrics, profile, "
+                  "sleep_check_ins, workout_day_plans, mobility_completions, "
+                  "coach_reports, coach_explain_usage CASCADE")
     return timescale_dsn

@@ -13,8 +13,10 @@ struct SleepView: View {
     @EnvironmentObject private var live: LiveViewModel
 
     // Local async state
+    @State private var selectedDate = Date()
     @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
     @State private var weekNights: [CachedSleepSession] = []
+    @State private var naps: [CachedSleepSession] = []
     @State private var showingAlarm = false
     @State private var stageBaselines = BaselineCalculator.StagePercents()
 
@@ -65,6 +67,9 @@ struct SleepView: View {
         .onChange(of: metrics.lastRefreshedAt) { _ in
             Task { await reloadLocal() }
         }
+        .onChange(of: selectedDate) { _ in
+            Task { await reloadLocal() }
+        }
     }
 
     // MARK: - Data loading
@@ -72,17 +77,33 @@ struct SleepView: View {
     /// Reads the locally-cached derived data only. Must NOT call metrics.refresh(),
     /// or the lastRefreshedAt change it emits re-triggers onChange in an infinite loop.
     private func reloadLocal() async {
-        detail = await metrics.sleepDetail()
+        detail = await metrics.sleepDetail(for: selectedDate)
         weekNights = await metrics.sevenNightSleepWake(nights: 7)
+        let dayKey = MetricsRepository.localDayString(for: selectedDate)
+        naps = await metrics.naps(endingOnDay: dayKey)
         let cal = Calendar(identifier: .gregorian)
         let fmt = DateFormatter()
         fmt.calendar = cal
-        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.timeZone = cal.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
-        let today = Date()
+        let today = selectedDate
         let from = cal.date(byAdding: .day, value: -30, to: today) ?? today
         let rows = await metrics.daily(fromDay: fmt.string(from: from), toDay: fmt.string(from: today))
         stageBaselines = BaselineCalculator.stagePercents(from: rows)
+    }
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(selectedDate)
+    }
+
+    private var selectedDayLabel: String {
+        TodayMetricHelpers.todayLabel(for: selectedDate, isViewingToday: isViewingToday)
+    }
+
+    private var checkInEfficiencyPct: Double? {
+        if let e = detail?.session.efficiency, e > 0 { return e * 100 }
+        if let e = detail?.daily?.efficiency, e > 0 { return e * 100 }
+        return nil
     }
 
     // MARK: - Loading
@@ -106,18 +127,31 @@ struct SleepView: View {
 
                 // Custom tight header (replaces the hidden system large-title nav bar)
                 ScreenHeader("Sueño")
+                DayNavigator(selectedDate: $selectedDate, showsCalendarPicker: true)
+                    .padding(.bottom, WH.Spacing.xs)
+
+                SleepCheckInCard(
+                    dayKey: MetricsRepository.localDayString(for: selectedDate),
+                    dayLabel: selectedDayLabel,
+                    recoveryPct: detail?.daily?.recovery,
+                    sleepEfficiencyPct: checkInEfficiencyPct
+                )
+
+                SleepCheckInCorrelationCard()
 
                 // 1. Headline — efficiency hero + total duration
                 headlineSection
 
                 sleepQualityCard
 
-                // 2. Hypnogram
+                // 2. Hypnogram (noche principal)
                 if let session = detail?.session {
                     HypnogramView(session: session)
                 } else {
-                    noDataCard(icon: "moon.zzz", message: "Sin etapas de sueño de anoche")
+                    noDataCard(icon: "moon.zzz", message: "Sin etapas de sueño · \(selectedDayLabel)")
                 }
+
+                napsSection
 
                 // 3. Stage breakdown + sleep stats
                 stageBreakdownSection
@@ -179,8 +213,13 @@ struct SleepView: View {
                 SleepPerformanceRing(scorePercent: score)
                     .frame(maxWidth: .infinity)
                     .padding(.top, WH.Spacing.sm)
+                Text("Porcentaje de tiempo dormido vs. tiempo en cama (no es cómo te sientes).")
+                    .font(WH.Font.caption)
+                    .foregroundStyle(WH.Color.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, WH.Spacing.sm)
             } else {
-                Text("Sin datos de anoche")
+                Text("Sin datos de sueño · \(selectedDayLabel)")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
                     .frame(maxWidth: .infinity)
@@ -188,7 +227,7 @@ struct SleepView: View {
             }
 
             if let session = session {
-                Text(formatTime(session.startTs) + " → " + formatTime(session.endTs))
+                Text("Noche · \(formatTime(session.startTs)) → \(formatTime(session.endTs))")
                     .font(.system(size: 13, weight: .medium, design: .default))
                     .fontWidth(.condensed)
                     .foregroundStyle(WH.Color.textSecondary)
@@ -248,11 +287,12 @@ struct SleepView: View {
         }
 
         if let reg = SleepQualityBuilder.regularityScore(from: weekNights) {
+            let nightCount = weekNights.filter { $0.isMainNight }.count
             rows.append(.init(
                 id: "regularity",
                 title: "Regularidad del sueño",
                 value: "\(Int(reg.rounded()))%",
-                context: SleepQualityBuilder.regularityContext(score: reg, nights: weekNights.count),
+                context: SleepQualityBuilder.regularityContext(score: reg, nights: max(nightCount, weekNights.count)),
                 gaugeValue: reg
             ))
         }
@@ -319,10 +359,10 @@ struct SleepView: View {
 
         return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             sectionHeader("Etapas del sueño")
-            Text("Hoy vs. 30 días anteriores · % del tiempo dormido")
+            Text("\(selectedDayLabel.capitalized) vs. 30 días anteriores · % del tiempo dormido")
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
-            Text("Estimación con pulsera (sin EEG). El sueño profundo es la etapa menos fiable.")
+            Text("Estimación con pulsera (sin EEG). Profundo y REM son aproximados; «Despierto» requiere movimiento + FC elevada ≥3 min para contar como perturbación.")
                 .font(.system(size: 11))
                 .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
 
@@ -668,7 +708,7 @@ struct SleepView: View {
                     .font(.system(size: 36, weight: .light))
                     .foregroundStyle(WH.Color.textSecondary)
                 if metrics.isServerConfigured {
-                    Text("Sin sueño registrado")
+                    Text(isViewingToday ? "Sin sueño registrado" : "Sin sueño · \(selectedDayLabel)")
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .foregroundStyle(WH.Color.textPrimary)
                     Text("Por la mañana: cierra la app oficial, abre OpenWhoop → Dispositivo → conecta el strap y espera la sincronización. Luego desliza hacia abajo aquí.")
@@ -727,6 +767,24 @@ struct SleepView: View {
                     in: RoundedRectangle(cornerRadius: WH.Radius.chip, style: .continuous))
     }
 
+    // MARK: - Siestas / descanso (no cuentan para recovery)
+
+    private var napsSection: some View {
+        Group {
+            if !naps.isEmpty {
+                VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+                    sectionHeader("Siestas y descanso")
+                    Text("Reposo detectado en la pulsera. No alimenta recovery ni el anillo de la noche.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                    ForEach(naps, id: \.startTs) { nap in
+                        NapSessionCard(session: nap, formatTime: formatTime, formatMinutes: formatMinutes)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Formatting helpers
 
     private func formatMinutes(_ totalMin: Double) -> String {
@@ -754,6 +812,57 @@ struct SleepView: View {
             let h = elapsed / 3600
             return "hace \(h)h"
         }
+    }
+}
+
+// MARK: - Nap session card
+
+private struct NapSessionCard: View {
+    let session: CachedSleepSession
+    let formatTime: (Int) -> String
+    let formatMinutes: (Double) -> String
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: WH.Spacing.sm) {
+                    Image(systemName: "powersleep")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(WH.Color.recoveryYellow)
+                        .frame(width: 28, height: 28)
+                        .background(WH.Color.recoveryYellow.opacity(0.12),
+                                    in: RoundedRectangle(cornerRadius: WH.Radius.small, style: .continuous))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Siesta")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(WH.Color.textPrimary)
+                        Text("\(formatTime(session.startTs)) → \(formatTime(session.endTs)) · \(formatMinutes(Double(session.endTs - session.startTs) / 60))")
+                            .font(WH.Font.caption)
+                            .foregroundStyle(WH.Color.textSecondary)
+                    }
+                    Spacer()
+                    if let eff = session.efficiency, eff > 0 {
+                        Text("\(Int((eff * 100).rounded()))%")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(WH.Color.textSecondary)
+                    }
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(WH.Color.textSecondary.opacity(0.6))
+                }
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                HypnogramView(session: session)
+            }
+        }
+        .padding(WH.Spacing.md)
+        .background(WH.Color.surface,
+                    in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
     }
 }
 

@@ -27,6 +27,9 @@ from app.analysis.sleep import (
     daily_sleep_summary,
     detect_sleep,
     hypnogram_metrics,
+    sessions_for_day,
+    sessions_labeled_for_day,
+    is_nap_like,
     _gravity_deltas,
     _merge_periods,
 )
@@ -296,6 +299,54 @@ class TestDailySummary:
     def test_empty_sessions(self):
         summary = daily_sleep_summary([], dt.date(2024, 1, 1))
         assert summary["total_sleep_min"] == 0
+
+
+class TestSessionsForDay:
+    """Primary-night selection: longest bout wins; edge + short false positives drop."""
+
+    def _ts(self, y: int, m: int, d: int, h: int, mi: int = 0) -> float:
+        return dt.datetime(y, m, d, h, mi, tzinfo=dt.timezone.utc).timestamp()
+
+    def _sess(self, start: float, end: float) -> SleepSession:
+        return SleepSession(start=start, end=end, efficiency=0.9, stages=[])
+
+    def test_picks_longest_night(self):
+        day = dt.date(2026, 6, 16)
+        main = self._sess(self._ts(2026, 6, 15, 23), self._ts(2026, 6, 16, 7))
+        nap = self._sess(self._ts(2026, 6, 16, 18), self._ts(2026, 6, 16, 19, 30))
+        picked = sessions_for_day([nap, main], day)
+        assert len(picked) == 1
+        assert picked[0] is main
+
+    def test_drops_window_edge_artifact(self):
+        day = dt.date(2026, 6, 16)
+        win_end = self._ts(2026, 6, 17, 0)
+        main = self._sess(self._ts(2026, 6, 15, 23), self._ts(2026, 6, 16, 7))
+        edge = self._sess(win_end - 5000, win_end - 1)
+        picked = sessions_for_day([main, edge], day, window_end=win_end)
+        assert len(picked) == 1
+        assert picked[0] is main
+
+    def test_summary_uses_primary_only(self):
+        day = dt.date(2026, 6, 16)
+        main = self._sess(1_781_562_807.0, 1_781_590_265.0)
+        false_pm = self._sess(1_781_636_938.0, 1_781_641_249.0)
+        summary = daily_sleep_summary([main, false_pm], day)
+        assert summary["sleep_start"] == pytest.approx(main.start)
+        assert summary["sleep_end"] == pytest.approx(main.end)
+        assert summary["total_sleep_min"] < 500
+
+    def test_detect_sleep_labels_nap_like_afternoon(self):
+        day = dt.date(2026, 6, 16)
+        main = self._sess(self._ts(2026, 6, 15, 23), self._ts(2026, 6, 16, 7))
+        nap = self._sess(self._ts(2026, 6, 16, 18), self._ts(2026, 6, 16, 19, 20))
+        assert is_nap_like(nap)
+        assert not is_nap_like(main)
+        labeled = sessions_labeled_for_day([nap, main], day)
+        kinds = {id(s): k for s, k in labeled}
+        assert kinds[id(main)] == "main"
+        assert kinds[id(nap)] == "nap"
+        assert len(sessions_for_day([nap, main], day)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -585,15 +636,34 @@ class TestSmoothing:
         assert sf.smooth_labels(labels, window=1) == labels
 
 
+class TestCollapseShortWake:
+    def test_brief_wake_becomes_light(self):
+        labels = ["light"] * 5 + ["wake"] * 4 + ["light"] * 5  # 2 min wake
+        out = sf.collapse_short_wake_runs(labels, min_epochs=6)
+        assert "wake" not in out
+
+    def test_sustained_wake_preserved(self):
+        labels = ["light"] * 3 + ["wake"] * 8 + ["light"] * 3  # 4 min wake
+        out = sf.collapse_short_wake_runs(labels, min_epochs=6)
+        assert out.count("wake") == 8
+
+
+class TestMergeShortBouts:
+    def test_short_rem_becomes_light(self):
+        labels = ["light"] * 5 + ["rem"] * 4 + ["light"] * 5
+        out = sf.merge_short_bouts(labels, "rem", min_epochs=8)
+        assert "rem" not in out
+
+
 class TestPhysiology:
-    def test_no_rem_in_first_15min_after_onset(self):
-        # 30 epochs; onset at 0. First 15 min = 30 epochs → all early. Mark some REM.
-        feats = [_mk_feat(index=i, clock=i / 60.0) for i in range(60)]
-        labels = ["rem"] * 60
-        out = sf.reimpose_physiology(labels, feats, onset_idx=0, final_wake_idx=59)
-        # epochs within 15 min (30 epochs) of onset must NOT be rem
-        early = out[:30]
-        assert "rem" not in early, f"early REM should be relabeled: {early}"
+    def test_no_rem_in_first_hour_after_onset(self):
+        # 60 epochs; onset at 0. First 60 min = 120 epochs → all early. Mark some REM.
+        feats = [_mk_feat(index=i, clock=i / 60.0) for i in range(120)]
+        labels = ["rem"] * 120
+        out = sf.reimpose_physiology(labels, feats, onset_idx=0, final_wake_idx=119)
+        # epochs within 60 min (120 epochs) of onset must NOT be rem
+        early = out[:120]
+        assert "rem" not in early, f"early REM should be relabeled: {set(early)}"
 
     def test_deep_in_last_third_downgraded(self):
         feats = [_mk_feat(index=i, clock=i / 30.0) for i in range(30)]  # clock 0..~1

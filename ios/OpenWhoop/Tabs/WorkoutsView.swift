@@ -10,8 +10,8 @@ enum ActivityRoute: Hashable { case crossfit, suggestDemo }
 
 struct WorkoutsView: View {
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var dayPlanStore: WorkoutDayPlanStore
     @StateObject private var labelStore = ActivityLabelStore()
-    @StateObject private var dayPlanStore = WorkoutDayPlanStore()
     @StateObject private var programStore = PRVNProgramStore.shared
     @State private var showProgramImport = false
     @State private var showDayEditor = false
@@ -27,6 +27,9 @@ struct WorkoutsView: View {
     @State private var errorMessage: String? = nil
     @State private var path: [ActivityRoute] = []
     @State private var sleepNights = 0
+    @State private var coachReport: TrainingDayCoachReport?
+    @State private var coachNarrative: String?
+    @State private var coachLoading = false
 
     // MARK: - Body
 
@@ -81,9 +84,15 @@ struct WorkoutsView: View {
                 workouts: selectedDayActivities,
                 labelStore: labelStore,
                 dayPlanStore: dayPlanStore,
+                programStore: programStore,
                 prvnDay: programStore.program(for: selectedDate),
                 isTrainingBout: isTrainingBout
             )
+        }
+        .onChange(of: showDayEditor) { open in
+            if !open {
+                Task { await reloadCoachReport(recompute: true) }
+            }
         }
         .sheet(item: $pickerWorkout) { workout in
             ActivityPickerView(workout: workout, labelStore: labelStore)
@@ -92,8 +101,66 @@ struct WorkoutsView: View {
             Task {
                 await reloadWeekRows()
                 await reloadSelectedDay()
+                await reloadCoachReport()
             }
         }
+    }
+
+    // MARK: - Coach analysis
+
+    @ViewBuilder
+    private var coachAnalysisSection: some View {
+        if metrics.isServerConfigured, resolvedDayWorkout.primary != nil {
+            if let report = coachReport {
+                TrainingCoachCard(
+                    report: report,
+                    isLoading: coachLoading,
+                    narrative: coachNarrative
+                )
+            } else if coachLoading {
+                TrainingCoachCard(
+                    report: TrainingDayCoachReport(
+                        day: selectedDayKey,
+                        style: nil,
+                        activityType: nil,
+                        primaryWorkoutId: nil,
+                        summary: TrainingCoachSummary(
+                            strainVsBaselinePct: nil,
+                            avgHrVsBaselinePct: nil,
+                            z4plusVsBaselinePct: nil,
+                            verdict: "typical",
+                            recoveryPct: nil,
+                            baselineSessionCount: nil
+                        ),
+                        blocks: [],
+                        insights: [],
+                        dataQuality: "good",
+                        inferredPlan: true,
+                        trainingContext: nil
+                    ),
+                    isLoading: true
+                )
+            }
+        }
+    }
+
+    private func reloadCoachReport(recompute: Bool = false) async {
+        guard metrics.isServerConfigured else {
+            coachReport = nil
+            return
+        }
+        guard resolvedDayWorkout.primary != nil else {
+            coachReport = nil
+            return
+        }
+        coachLoading = true
+        coachReport = await metrics.coachReport(forDay: selectedDayKey, recompute: recompute)
+        if coachReport != nil, CoachLLMSettings.isEnabled {
+            coachNarrative = await metrics.coachNarrative(forDay: selectedDayKey)?.narrative
+        } else {
+            coachNarrative = nil
+        }
+        coachLoading = false
     }
 
     // MARK: - Loading
@@ -127,6 +194,9 @@ struct WorkoutsView: View {
                 }
 
                 strainRingSection
+                if let recommendation = activityRecommendation {
+                    ActivityRecommendationCard(recommendation: recommendation)
+                }
                 PRVNTodayProgramCard(
                     store: programStore,
                     date: selectedDate,
@@ -137,6 +207,7 @@ struct WorkoutsView: View {
                 .padding(.horizontal, WH.Spacing.md)
                 sportInsightsCard
                 crossFitCard
+                coachAnalysisSection
 
                 if !weekRows.isEmpty || selectedDayStrain != nil {
                     WeeklyBarChart(
@@ -165,6 +236,12 @@ struct WorkoutsView: View {
                 Text(isViewingToday ? "Esfuerzo de hoy aún sin calcular" : "Sin esfuerzo calculado este día")
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
+            } else {
+                Text("Calculado por FC y tiempo en zona — el tipo de actividad que etiquetes no cambia el strain.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, WH.Spacing.md)
             }
         }
         .frame(maxWidth: .infinity)
@@ -180,11 +257,16 @@ struct WorkoutsView: View {
     }
 
     private var resolvedDayWorkout: ResolvedDayWorkout {
-        dayPlanStore.resolve(
+        trainingContext.resolved
+    }
+
+    private var trainingContext: DayTrainingContext {
+        dayPlanStore.trainingContext(
             dayKey: selectedDayKey,
+            calendarDate: selectedDate,
             workouts: selectedDayActivities,
             labelStore: labelStore,
-            prvnDay: programStore.program(for: selectedDate),
+            prvnStore: programStore,
             isTrainingBout: isTrainingBout
         )
     }
@@ -642,7 +724,7 @@ struct WorkoutsView: View {
                  : "Sin actividad detectada este día")
                 .font(.system(size: 17, weight: .semibold, design: .rounded))
                 .foregroundStyle(WH.Color.textPrimary)
-            Text("Las actividades se detectan a partir de tu frecuencia cardíaca. Desliza hacia abajo para actualizar.")
+            Text(emptyStateDetail)
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
                 .multilineTextAlignment(.center)
@@ -662,10 +744,27 @@ struct WorkoutsView: View {
         .padding(.vertical, WH.Spacing.xxl)
     }
 
+    private var emptyStateDetail: String {
+        if !metrics.isServerConfigured {
+            return "No hay servidor configurado (WHOOP_BASE_URL en Ajustes). Sin servidor no hay entrenos ni esfuerzo calculado."
+        }
+        if let err = errorMessage ?? metrics.lastError {
+            return "\(err) Desliza hacia abajo para reintentar."
+        }
+        if weekRows.isEmpty && metrics.today == nil {
+            return "No hay métricas en caché. Comprueba que el Mac/servidor esté encendido y desliza para sincronizar."
+        }
+        if selectedDayStrain != nil {
+            return "Hay esfuerzo registrado pero ningún entreno concreto. Puedes definir el entreno manualmente o clasificar cuando aparezca."
+        }
+        return "Las actividades se detectan a partir de tu frecuencia cardíaca. Si acabas de entrenar, puede tardar unos minutos en sincronizar. Desliza hacia abajo para actualizar."
+    }
+
     // MARK: - Day workout card
 
     private var dayWorkoutCard: some View {
         let resolved = resolvedDayWorkout
+        let ctx = trainingContext
         return Button { showDayEditor = true } label: {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                 HStack {
@@ -679,7 +778,26 @@ struct WorkoutsView: View {
                         .foregroundStyle(WH.Color.strainBlue)
                 }
 
-                if let type = resolved.activityType {
+                HStack(spacing: WH.Spacing.xs) {
+                    Image(systemName: ctx.isRestDay ? "bed.double.fill" : "link")
+                        .font(.system(size: 11))
+                        .foregroundStyle(WH.Color.strainBlue.opacity(0.85))
+                    Text("Movilidad · \(ctx.sourceLabel)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
+
+                if ctx.isRestDay {
+                    HStack(spacing: WH.Spacing.sm) {
+                        Image(systemName: "bed.double.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(WH.Color.textSecondary)
+                        Text("Descanso — sin entreno hoy")
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
+                            .foregroundStyle(WH.Color.textSecondary)
+                        Spacer()
+                    }
+                } else if let type = resolved.activityType {
                     HStack(spacing: WH.Spacing.sm) {
                         Image(systemName: resolved.crossfitStyle?.icon ?? type.symbol)
                             .font(.system(size: 20))
@@ -765,6 +883,41 @@ struct WorkoutsView: View {
 
     // MARK: - Data
 
+    private var activityRecommendation: ActivityRecommendation? {
+        guard isViewingToday else { return nil }
+        let hour = Calendar.current.component(.hour, from: Date())
+        let dayKey = MetricsRepository.localDayString(for: selectedDate)
+        let checkIn = SleepCheckInStore.shared.entry(forDayKey: dayKey)
+        let yesterdayKey = MetricsRepository.localDayString(
+            for: Calendar.current.date(byAdding: .day, value: -1, to: selectedDate) ?? selectedDate
+        )
+        let strainYesterday = weekRows.first(where: { $0.day == yesterdayKey })?.strain
+
+        let completedMobility = Set(
+            MobilitySessionKind.allCases.filter {
+                MobilityCompletionStore.shared.isCompleted(dayKey: dayKey, sessionKind: $0)
+            }
+        )
+
+        let ctx = trainingContext
+        let recCtx = ActivityRecommendationContext(
+            dayKey: dayKey,
+            recoveryPercent: recoveryPercentForSelectedDay,
+            strainToday: selectedDayStrain,
+            strainYesterday: strainYesterday,
+            prvnDay: ctx.effectivePrvnDay,
+            morningFeeling: checkIn?.morningFeeling,
+            activityCountToday: selectedDayActivities.count,
+            trainingBoutCountToday: selectedDayActivities.filter(isTrainingBout).count,
+            hourOfDay: hour,
+            isToday: true,
+            blocksDone: ctx.blocksDone,
+            completedMobilitySessions: completedMobility,
+            isRestDay: ctx.isRestDay
+        )
+        return ActivityRecommendationEngine.recommend(context: recCtx)
+    }
+
     private var recoveryPercentForSelectedDay: Int? {
         let daily: DailyMetric?
         if isViewingToday {
@@ -804,9 +957,18 @@ struct WorkoutsView: View {
         await metrics.refresh()
         sleepNights = await metrics.sleepNightCount()
         let (from, to) = dateRange(daysBack: 30)
-        workouts = await metrics.workouts(from: from, to: to)
+        let fetched = await metrics.workouts(from: from, to: to)
+        workouts = fetched
         await reloadWeekRows()
         await reloadSelectedDay()
+        await reloadCoachReport()
+        if metrics.isServerConfigured, fetched.isEmpty, selectedDayActivities.isEmpty {
+            if metrics.today == nil && weekRows.isEmpty {
+                errorMessage = "No se pudieron cargar métricas del servidor."
+            } else if isViewingToday {
+                errorMessage = nil
+            }
+        }
         if isLoading { isLoading = false }
     }
 
@@ -830,7 +992,7 @@ struct WorkoutsView: View {
     }
 
     private func restingHr(for day: Date) -> Int? {
-        let key = MetricsRepository.utcDayString(for: day)
+        let key = MetricsRepository.localDayString(for: day)
         if isViewingToday {
             return weekRows.first { $0.day == key }?.restingHr ?? metrics.today?.restingHr
         }

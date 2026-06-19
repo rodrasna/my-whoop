@@ -21,6 +21,17 @@ enum AlarmKeys {
     static let smartWakeLeadMin = "alarmSmartWakeLeadMin"
     /// Epoch seconds of the last successfully armed firmware alarm, for the status line.
     static let armedEpoch       = "alarmArmedEpoch"
+
+    /// Next local wake time at `hour:minute` strictly after `after` (today or tomorrow).
+    static func nextFireDate(hour: Int, minute: Int, after: Date = Date()) -> Date {
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: after)
+        comps.hour = hour
+        comps.minute = minute
+        comps.second = 0
+        let candidate = Calendar.current.date(from: comps) ?? after
+        if candidate > after.addingTimeInterval(5) { return candidate }
+        return Calendar.current.date(byAdding: .day, value: 1, to: candidate) ?? candidate
+    }
 }
 
 // MARK: - AlarmView
@@ -71,11 +82,17 @@ struct AlarmView: View {
                         .foregroundStyle(WH.Color.strainBlue)
                 }
             }
-            .onAppear { syncPickerFromStorage() }
+            .onAppear {
+                syncPickerFromStorage()
+                refreshArmedAlarmIfNeeded()
+            }
             .onChange(of: wakeByDate) { date in
                 let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
                 wakeByHour   = comps.hour   ?? wakeByHour
                 wakeByMinute = comps.minute ?? wakeByMinute
+            }
+            .onChange(of: live.firmwareAlarmVerified) { verified in
+                if verified { armError = nil }
             }
             .alert("Pulsera no conectada", isPresented: $showDisconnectedAlert) {
                 Button("Entendido", role: .cancel) {}
@@ -179,17 +196,39 @@ struct AlarmView: View {
                 }
                 if alarmEnabled, armedEpoch > 0 {
                     let fireDate = Date(timeIntervalSince1970: armedEpoch)
+                    let isPast = fireDate < Date().addingTimeInterval(-60)
                     HStack(spacing: WH.Spacing.xs) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(WH.Color.recoveryGreen)
+                        Image(systemName: isPast ? "clock.arrow.circlepath" : "checkmark.circle.fill")
+                            .foregroundStyle(isPast ? WH.Color.recoveryYellow : WH.Color.recoveryGreen)
                             .font(.system(size: 14))
-                        Text("Alarma programada para las \(formattedTime(fireDate))")
+                        Text(isPast
+                             ? "Reprogramar al conectar la pulsera"
+                             : "Próxima alarma: \(nextAlarmLabel(fireDate))")
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
                             .foregroundStyle(WH.Color.textPrimary)
                     }
-                    Text("La pulsera vibrará a las \(formattedTime(fireDate)).")
-                        .font(WH.Font.caption)
-                        .foregroundStyle(WH.Color.textSecondary)
+                    if !isPast {
+                        HStack(spacing: WH.Spacing.xs) {
+                            Image(systemName: live.firmwareAlarmVerified ? "applewatch.radiowaves.left.and.right" : "applewatch")
+                                .foregroundStyle(live.firmwareAlarmVerified ? WH.Color.recoveryGreen : WH.Color.recoveryYellow)
+                                .font(.system(size: 12))
+                            Text(live.firmwareAlarmVerified
+                                 ? "Firmware en pulsera confirmado — vibrará aunque cierres la app"
+                                 : "Confirmando alarma en la pulsera…")
+                                .font(WH.Font.caption)
+                                .foregroundStyle(WH.Color.textSecondary)
+                        }
+                    }
+                    if isPast {
+                        let next = nextOccurrence(hour: wakeByHour, minute: wakeByMinute)
+                        Text("La pulsera suena una sola vez por programación. Al conectar (pestaña Dispositivo) se vuelve a armar para \(nextAlarmLabel(next)).")
+                            .font(WH.Font.caption)
+                            .foregroundStyle(WH.Color.textSecondary)
+                    } else {
+                        Text("La pulsera vibrará a las \(formattedTimeOnly(fireDate)). Se repite cada día al sincronizar con la pulsera.")
+                            .font(WH.Font.caption)
+                            .foregroundStyle(WH.Color.textSecondary)
+                    }
                     if smartWakeEnabled {
                         Text("Despertar inteligente: buscará un momento de sueño ligero hasta "
                              + "\(smartWakeLeadMin) min antes.")
@@ -218,9 +257,11 @@ struct AlarmView: View {
         Section {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                 noteRow(icon: "wave.3.right",
-                        text: "La pulsera debe estar conectada y puesta en el momento de armar para que la alarma suene.")
+                        text: "«Probar alarma» vibra al instante. Con la app abierta o en segundo plano, un temporizador repite esa vibración. Además, OpenWhoop programa la alarma en el firmware de la pulsera (SET_ALARM_TIME) — eso es lo que debe funcionar si cierras la app.")
                 noteRow(icon: "iphone.slash",
-                        text: "La alarma de firmware a hora fija se activa aunque la app esté cerrada o el móvil bloqueado.")
+                        text: "Si cierras OpenWhoop por completo (deslizar hacia arriba en el conmutador), iOS mata la app: la pulsera solo vibrará si el firmware la aceptó; además recibirás una notificación en el móvil.")
+                noteRow(icon: "lock.fill",
+                        text: "Con la app en segundo plano y el móvil bloqueado suele funcionar la vibración en la pulsera (Bluetooth activo).")
                 noteRow(icon: "exclamationmark.triangle",
                         text: "El despertar inteligente por BLE en segundo plano requiere prueba en dispositivo real — "
                             + "no puede verificarse en el simulador.")
@@ -271,6 +312,11 @@ struct AlarmView: View {
         setAlarm()
     }
 
+    private func refreshArmedAlarmIfNeeded() {
+        guard alarmEnabled, live.state.connected, live.canArmStrapAlarm else { return }
+        live.restoreStrapAlarmIfNeeded()
+    }
+
     private func setAlarm() {
         let fireDate = nextOccurrence(hour: wakeByHour, minute: wakeByMinute)
         guard live.armStrapAlarm(at: fireDate, smartWake: smartWakeEnabled, leadMinutes: smartWakeLeadMin) else {
@@ -279,7 +325,9 @@ struct AlarmView: View {
         }
         alarmEnabled = true
         armedEpoch   = fireDate.timeIntervalSince1970
-        armError     = nil
+        armError     = live.firmwareAlarmVerified
+            ? nil
+            : "Alarma en el teléfono programada. Confirmando firmware en la pulsera…"
     }
 
     private func disableAlarm() {
@@ -306,9 +354,7 @@ struct AlarmView: View {
 
     /// Next occurrence of `hour:minute` — today if still in the future, tomorrow otherwise.
     private func nextOccurrence(hour: Int, minute: Int) -> Date {
-        let candidate = AlarmView.todayAt(hour: hour, minute: minute)
-        if candidate > Date() { return candidate }
-        return Calendar.current.date(byAdding: .day, value: 1, to: candidate) ?? candidate
+        AlarmKeys.nextFireDate(hour: hour, minute: minute)
     }
 
     private func formattedTime(_ date: Date) -> String {
@@ -316,6 +362,27 @@ struct AlarmView: View {
         f.dateStyle  = .short
         f.timeStyle  = .short
         return f.string(from: date)
+    }
+
+    private func formattedTimeOnly(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: date)
+    }
+
+    private func nextAlarmLabel(_ fireDate: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(fireDate) {
+            return "hoy \(formattedTimeOnly(fireDate))"
+        }
+        if cal.isDateInTomorrow(fireDate) {
+            return "mañana \(formattedTimeOnly(fireDate))"
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "es_ES")
+        f.setLocalizedDateFormatFromTemplate("EEE HH:mm")
+        return f.string(from: fireDate)
     }
 }
 

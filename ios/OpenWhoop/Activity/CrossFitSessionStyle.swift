@@ -26,7 +26,7 @@ enum CrossFitSessionStyle: String, Codable, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .regular:   return "figure.gymnastics"
+        case .regular:   return "figure.strengthtraining.traditional"
         case .qualifier: return "trophy.fill"
         case .benchmark: return "chart.bar.fill"
         case .hero:      return "flame.fill"

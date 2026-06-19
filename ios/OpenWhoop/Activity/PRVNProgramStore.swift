@@ -36,6 +36,14 @@ final class PRVNProgramStore: ObservableObject {
         week?.program(for: date, calendar: calendar)
     }
 
+    func program(forDayKey dayKey: String) -> PRVNDayProgram? {
+        week?.days.first { $0.id == dayKey }
+    }
+
+    var currentWeekDays: [PRVNDayProgram] {
+        week?.days.sorted { $0.id < $1.id } ?? []
+    }
+
     static func dayKey(for date: Date, calendar: Calendar = .current) -> String {
         let fmt = DateFormatter()
         fmt.calendar = calendar

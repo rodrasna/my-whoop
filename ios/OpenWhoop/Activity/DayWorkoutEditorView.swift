@@ -9,23 +9,41 @@ struct DayWorkoutEditorView: View {
     let workouts: [Workout]
     @ObservedObject var labelStore: ActivityLabelStore
     @ObservedObject var dayPlanStore: WorkoutDayPlanStore
+    @ObservedObject var programStore: PRVNProgramStore
     let prvnDay: PRVNDayProgram?
     let isTrainingBout: (Workout) -> Bool
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var metrics: MetricsRepository
 
     @State private var primaryId: String?
     @State private var activityType: ActivityType?
     @State private var crossfitStyle: CrossFitSessionStyle?
     @State private var blocksDone: Set<ProgramBlockKind> = []
     @State private var note: String = ""
+    @State private var prvnReferenceMode: PRVNReferenceMode = .calendar
+    @State private var prvnReferenceDayKey: String?
 
     private var sortedWorkouts: [Workout] {
         workouts.sorted { $0.startTs > $1.startTs }
     }
 
+    private var effectivePrvnDay: PRVNDayProgram? {
+        switch prvnReferenceMode {
+        case .rest:
+            return nil
+        case .calendar:
+            return prvnDay
+        case .otherWeekDay:
+            if let key = prvnReferenceDayKey {
+                return programStore.program(forDayKey: key) ?? prvnDay
+            }
+            return prvnDay
+        }
+    }
+
     private var availableBlockKinds: [ProgramBlockKind] {
-        if let prvn = prvnDay {
+        if let prvn = effectivePrvnDay {
             let kinds = prvn.blocks.map(\.kind).filter { $0 != .other }
             if !kinds.isEmpty { return kinds.sorted(by: blockSort) }
         }
@@ -38,6 +56,7 @@ struct DayWorkoutEditorView: View {
                 WH.Color.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: WH.Spacing.lg) {
+                        prvnReferenceSection
                         primarySection
                         typeSection
                         if activityType == .crossfit { crossfitStyleSection }
@@ -74,6 +93,110 @@ struct DayWorkoutEditorView: View {
     }
 
     // MARK: - Sections
+
+    private var prvnReferenceSection: some View {
+        VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+            sectionLabel("PROGRAMA DE REFERENCIA")
+            Text("Coordina movilidad y análisis: elige qué WOD de PRVN aplica hoy, otro día de la semana, o descanso.")
+                .font(.system(size: 11))
+                .foregroundStyle(WH.Color.textSecondary)
+
+            VStack(spacing: 1) {
+                ForEach(PRVNReferenceMode.allCases) { mode in
+                    Button {
+                        prvnReferenceMode = mode
+                        if mode == .calendar {
+                            prvnReferenceDayKey = nil
+                        } else if mode == .otherWeekDay, prvnReferenceDayKey == nil {
+                            prvnReferenceDayKey = programStore.currentWeekDays.first?.id
+                        }
+                    } label: {
+                        HStack(spacing: WH.Spacing.md) {
+                            Image(systemName: prvnModeIcon(mode))
+                                .font(.system(size: 16))
+                                .foregroundStyle(prvnReferenceMode == mode ? WH.Color.strainBlue : WH.Color.textSecondary)
+                                .frame(width: 28)
+                            Text(mode.label)
+                                .font(.system(size: 15))
+                                .foregroundStyle(WH.Color.textPrimary)
+                            Spacer()
+                            if prvnReferenceMode == mode {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(WH.Color.strainBlue)
+                            }
+                        }
+                        .padding(.horizontal, WH.Spacing.md)
+                        .padding(.vertical, WH.Spacing.sm + 2)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .background(WH.Color.surface,
+                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+
+            if prvnReferenceMode == .otherWeekDay {
+                let days = programStore.currentWeekDays
+                if days.isEmpty {
+                    Text("Importa la semana PRVN en CrossFit para elegir otro día.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .padding(.top, WH.Spacing.xs)
+                } else {
+                    VStack(spacing: 1) {
+                        ForEach(days) { day in
+                            Button {
+                                prvnReferenceDayKey = day.id
+                                if blocksDone.isEmpty {
+                                    blocksDone = Set(day.blocks.map(\.kind).filter { $0 != .other })
+                                }
+                            } label: {
+                                HStack(spacing: WH.Spacing.sm) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(prvnDayTitle(day))
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(WH.Color.textPrimary)
+                                        Text(day.dayType.displayName)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(WH.Color.textSecondary)
+                                    }
+                                    Spacer()
+                                    if prvnReferenceDayKey == day.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(WH.Color.strainBlue)
+                                    }
+                                }
+                                .padding(.horizontal, WH.Spacing.md)
+                                .padding(.vertical, WH.Spacing.sm)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .background(WH.Color.surface,
+                                in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+                    .padding(.top, WH.Spacing.xs)
+                }
+            }
+        }
+    }
+
+    private func prvnModeIcon(_ mode: PRVNReferenceMode) -> String {
+        switch mode {
+        case .calendar:     return "calendar"
+        case .otherWeekDay: return "calendar.badge.clock"
+        case .rest:         return "bed.double.fill"
+        }
+    }
+
+    private func prvnDayTitle(_ day: PRVNDayProgram) -> String {
+        guard let date = MetricsRepository.parseLocalDay(day.id) else { return day.id }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "es_ES")
+        fmt.setLocalizedDateFormatFromTemplate("EEEE d MMM")
+        return fmt.string(from: date).capitalized
+    }
 
     private var primarySection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
@@ -170,7 +293,7 @@ struct DayWorkoutEditorView: View {
     private var structureSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             sectionLabel("ESTRUCTURA")
-            Text("Marca qué bloques hiciste realmente (p. ej. solo WOD en un clasificatorio).")
+            Text("Marca qué bloques hiciste (p. ej. solo WOD). Si no coincide con PRVN, descríbelo en notas.")
                 .font(.system(size: 11))
                 .foregroundStyle(WH.Color.textSecondary)
 
@@ -208,7 +331,7 @@ struct DayWorkoutEditorView: View {
     private var noteSection: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             sectionLabel("NOTAS")
-            TextField("Ej. Open 26.2, scaled, sin accesorios…", text: $note, axis: .vertical)
+            TextField("Ej. Open 26.2 scaled, solo fuerza con sentadilla 5×5…", text: $note, axis: .vertical)
                 .lineLimit(2...4)
                 .font(.system(size: 15))
                 .foregroundStyle(WH.Color.textPrimary)
@@ -283,9 +406,20 @@ struct DayWorkoutEditorView: View {
             crossfitStyle = saved?.crossfitStyle
         }
 
+        if saved?.isRestDay == true {
+            prvnReferenceMode = .rest
+            prvnReferenceDayKey = nil
+        } else if let ref = saved?.prvnReferenceDayKey?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+            prvnReferenceMode = .otherWeekDay
+            prvnReferenceDayKey = ref
+        } else {
+            prvnReferenceMode = .calendar
+            prvnReferenceDayKey = nil
+        }
+
         if let saved, !saved.blocksDone.isEmpty {
             blocksDone = Set(saved.blocksDone)
-        } else if let prvn = prvnDay {
+        } else if let prvn = effectivePrvnDay {
             blocksDone = Set(prvn.blocks.map(\.kind).filter { $0 != .other })
         }
 
@@ -293,15 +427,24 @@ struct DayWorkoutEditorView: View {
     }
 
     private func save() {
+        let refKey: String? = prvnReferenceMode == .otherWeekDay
+            ? prvnReferenceDayKey?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            : nil
         var plan = WorkoutDayPlan(
             primaryWorkoutId: primaryId,
             activityType: activityType,
             crossfitStyle: activityType == .crossfit ? crossfitStyle : nil,
             blocksDone: Array(blocksDone).sorted(by: blockSort),
-            note: note.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            prvnReferenceDayKey: refKey,
+            isRestDay: prvnReferenceMode == .rest
         )
         if !plan.hasContent { plan = WorkoutDayPlan() }
         dayPlanStore.set(plan.hasContent ? plan : nil, for: dayKey)
+
+        Task {
+            await metrics.pushDayPlan(dayKey: dayKey, plan: plan.hasContent ? plan : nil)
+        }
 
         if let primaryId, let w = workouts.first(where: { $0.id == primaryId }) {
             if let activityType {

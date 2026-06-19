@@ -128,10 +128,15 @@ final class MetricsRepository: ObservableObject {
         // Fetch last 14 days of sleep sessions; take the most-recent (last) row.
         let windowStart = Int(now.timeIntervalSince1970) - 14 * 86_400
         let windowEnd   = Int(now.timeIntervalSince1970) + 86_400   // +1 day buffer
-        lastNight = (try? await store.sleepSessions(deviceId: deviceId,
-                                                    from: windowStart,
-                                                    to: windowEnd,
-                                                    limit: 50))?.last
+        let recent = (try? await store.sleepSessions(deviceId: deviceId,
+                                                     from: windowStart,
+                                                     to: windowEnd,
+                                                     limit: 50)) ?? []
+        // Main night only: longest in-bed bout (drops window-edge / sedentary false positives).
+        lastNight = recent
+            .filter { $0.endTs - $0.startTs >= 3 * 3600 }
+            .max(by: { $0.endTs < $1.endTs })
+            ?? recent.last
     }
 
     // MARK: - Refresh from server then reload
@@ -144,7 +149,12 @@ final class MetricsRepository: ObservableObject {
         isRefreshing = true
         lastError = nil
         if !isDemoPreviewActive {
-            await serverSync?.pullDerived()
+            if serverSync == nil {
+                lastError = "Servidor no configurado"
+            } else {
+                let ok = await serverSync?.pullDerivedWithStatus() ?? false
+                if !ok { lastError = "No se pudo sincronizar con el servidor" }
+            }
         }
         await load()
         isRefreshing = false
@@ -153,6 +163,7 @@ final class MetricsRepository: ObservableObject {
         if !isDemoPreviewActive {
             await maybeAutoSyncPRVNProgram()
             await loadPRVNProgramFromServerIfNeeded()
+            await syncSleepCheckIns()
         }
 
         // Morning recovery notification: fire once per calendar day when recovery is available.
@@ -183,18 +194,52 @@ final class MetricsRepository: ObservableObject {
         await daily(fromDay: day, toDay: day).first
     }
 
-    /// Sleep session whose `endTs` falls on `day` (UTC YYYY-MM-DD).
-    func sleepSession(endingOnDay day: String) async -> CachedSleepSession? {
+    /// Among sessions, keep the longest **main** bout per local wake-day (`endTs`).
+    nonisolated static func primarySessionsPerWakeDay(_ sessions: [CachedSleepSession]) -> [CachedSleepSession] {
+        let mains = sessions.filter { $0.isMainNight }
+        let pool = mains.isEmpty ? sessions.filter { !$0.isNap } : mains
+        var byDay: [String: CachedSleepSession] = [:]
+        for s in pool {
+            let day = localDayString(fromEpoch: s.endTs)
+            if let existing = byDay[day] {
+                if (s.endTs - s.startTs) > (existing.endTs - existing.startTs) {
+                    byDay[day] = s
+                }
+            } else {
+                byDay[day] = s
+            }
+        }
+        return byDay.values.sorted { $0.startTs < $1.startTs }
+    }
+
+    private func sessionsEndingOnDay(_ day: String) async -> [CachedSleepSession] {
         await ensureOpen()
-        guard let store else { return nil }
-        guard let bounds = Self.epochBounds(forDay: day) else { return nil }
+        guard let store else { return [] }
+        guard let bounds = Self.epochBounds(forDay: day) else { return [] }
         let windowStart = bounds.start - 86_400
         let windowEnd   = bounds.end + 86_400
         let sessions = (try? await store.sleepSessions(deviceId: deviceId,
                                                        from: windowStart,
                                                        to: windowEnd,
                                                        limit: 30)) ?? []
-        return sessions.last { Self.dayString(fromEpoch: $0.endTs) == day }
+        return sessions.filter { Self.localDayString(fromEpoch: $0.endTs) == day }
+    }
+
+    /// Sleep session whose wake (`endTs`) falls on `day` (local calendar `yyyy-MM-dd`).
+    func sleepSession(endingOnDay day: String) async -> CachedSleepSession? {
+        let onDay = await sessionsEndingOnDay(day)
+        let mains = onDay.filter { $0.isMainNight }
+        let pool = mains.isEmpty ? onDay.filter { !$0.isNap } : mains
+        if pool.isEmpty {
+            return onDay.max(by: { ($0.endTs - $0.startTs) < ($1.endTs - $1.startTs) })
+        }
+        return pool.max(by: { ($0.endTs - $0.startTs) < ($1.endTs - $1.startTs) })
+    }
+
+    /// Siestas / descanso etiquetados como ``nap`` para el día de despertar `day`.
+    func naps(endingOnDay day: String) async -> [CachedSleepSession] {
+        let onDay = await sessionsEndingOnDay(day)
+        return onDay.filter { $0.isNap }.sorted { $0.startTs < $1.startTs }
     }
 
     /// Local calendar `yyyy-MM-dd` for metric lookups and weekly charts (matches server UTC day labels for CET users).
@@ -204,6 +249,23 @@ final class MetricsRepository: ObservableObject {
         fmt.timeZone = calendar.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
         return fmt.string(from: calendar.startOfDay(for: date))
+    }
+
+    nonisolated static func localDayString(fromEpoch epoch: Int, calendar: Calendar = .current) -> String {
+        let fmt = DateFormatter()
+        fmt.calendar = calendar
+        fmt.timeZone = calendar.timeZone
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
+    }
+
+    /// Parse local `yyyy-MM-dd` back to start-of-day `Date`.
+    nonisolated static func parseLocalDay(_ dayKey: String, calendar: Calendar = .current) -> Date? {
+        let fmt = DateFormatter()
+        fmt.calendar = calendar
+        fmt.timeZone = calendar.timeZone
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.date(from: dayKey).map { calendar.startOfDay(for: $0) }
     }
 
     /// UTC `yyyy-MM-dd` for the instant of local start-of-day (legacy sleep/window keys).
@@ -219,10 +281,10 @@ final class MetricsRepository: ObservableObject {
         return fmt.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
     }
 
-    private static func epochBounds(forDay day: String) -> (start: Int, end: Int)? {
+    private static func epochBounds(forDay day: String, calendar: Calendar = .current) -> (start: Int, end: Int)? {
         let fmt = DateFormatter()
-        fmt.calendar = Calendar(identifier: .gregorian)
-        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.calendar = calendar
+        fmt.timeZone = calendar.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
         guard let date = fmt.date(from: day) else { return nil }
         let start = Int(date.timeIntervalSince1970)
@@ -248,6 +310,77 @@ final class MetricsRepository: ObservableObject {
     func putProfile(_ profile: Profile) async -> Bool {
         await ensureOpen()
         return await serverSync?.putProfile(profile) ?? false
+    }
+
+    /// Pull recent check-ins from server and merge into local store.
+    func syncSleepCheckIns() async {
+        await ensureOpen()
+        guard let serverSync else { return }
+        let cal = Calendar.current
+        let to = Date()
+        guard let from = cal.date(byAdding: .day, value: -60, to: to) else { return }
+        let fromDay = Self.localDayString(for: from, calendar: cal)
+        let toDay = Self.localDayString(for: to, calendar: cal)
+        if let remote = await serverSync.getSleepCheckIns(from: fromDay, to: toDay) {
+            SleepCheckInStore.shared.mergeFromServer(remote)
+        }
+    }
+
+    /// Push one check-in to server (idempotent upsert). Best-effort.
+    func pushSleepCheckIn(_ checkIn: SleepCheckIn) async {
+        await ensureOpen()
+        _ = await serverSync?.putSleepCheckIn(checkIn)
+    }
+
+    /// Push manual workout day plan to server for coach context. Best-effort.
+    func pushDayPlan(dayKey: String, plan: WorkoutDayPlan?) async {
+        await ensureOpen()
+        guard let serverSync else { return }
+        if let plan, plan.hasContent {
+            _ = await serverSync.putDayPlan(dayKey: dayKey, plan: plan)
+        } else {
+            _ = await serverSync.deleteDayPlan(dayKey: dayKey)
+        }
+    }
+
+    /// Push mobility session completion to server. Best-effort.
+    func pushMobilityCompletion(_ entry: MobilityCompletionEntry) async {
+        await ensureOpen()
+        _ = await serverSync?.putMobilityCompletion(entry)
+    }
+
+    /// Fetch training coach report (GET cache, else POST compute). Best-effort.
+    func coachReport(forDay dayKey: String, recompute: Bool = false) async -> TrainingDayCoachReport? {
+        await ensureOpen()
+        guard let serverSync else { return nil }
+        if recompute {
+            return await serverSync.computeCoachReport(dayKey: dayKey)
+        }
+        return await serverSync.fetchCoachReport(dayKey: dayKey)
+    }
+
+    /// Optional LLM/template narrative for a coach report. Requires toggle in Settings.
+    func coachNarrative(forDay dayKey: String) async -> CoachNarrativeResponse? {
+        await ensureOpen()
+        guard CoachLLMSettings.isEnabled else { return nil }
+        return await serverSync?.explainCoachReport(
+            dayKey: dayKey,
+            includeNote: CoachLLMSettings.includeDayNote
+        )
+    }
+
+    /// Analiza transcripción de voz en servidor y devuelve sensación estructurada + contraste con pulsera.
+    func analyzeSleepCheckIn(transcript: String,
+                             dayKey: String,
+                             recoveryPct: Double?,
+                             sleepEfficiencyPct: Double?) async -> SleepCheckInAnalyzeResult? {
+        await ensureOpen()
+        return await serverSync?.analyzeSleepCheckIn(
+            transcript: transcript,
+            dayKey: dayKey,
+            recoveryPct: recoveryPct,
+            sleepEfficiencyPct: sleepEfficiencyPct
+        )
     }
 
     /// Pull PRVN week from SugarWOD via server credentials. Returns false when unconfigured or on error.
@@ -309,37 +442,19 @@ final class MetricsRepository: ObservableObject {
 
     // MARK: - Sleep tab reads (M2)
 
-    /// Returns the most-recent sleep session paired with the `DailyMetric` for the day its
-    /// `endTs` falls on (UTC date), or nil when there are no cached sessions.
-    ///
-    /// The session carries stagesJSON / efficiency / RHR / HRV; the daily row carries stage
-    /// minutes, disturbances, total_sleep_min, and the new in-sleep signals (spo2/skin-temp/resp).
-    /// The Sleep tab reads both from this single call to avoid two separate async round-trips.
-    func sleepDetail() async -> (session: CachedSleepSession, daily: DailyMetric?)? {
+    /// Night detail for a calendar day (local day key). Prefer over `sleepDetail()` when the UI has a day picker.
+    func sleepDetail(for date: Date) async -> (session: CachedSleepSession, daily: DailyMetric?)? {
         await ensureOpen()
-        guard let store else { return nil }
-
-        // Fetch the most-recent session from the last 14 days.
-        let now = Int(Date().timeIntervalSince1970)
-        let windowStart = now - 14 * 86_400
-        let windowEnd   = now + 86_400
-        guard let session = (try? await store.sleepSessions(deviceId: deviceId,
-                                                            from: windowStart,
-                                                            to: windowEnd,
-                                                            limit: 50))?.last else { return nil }
-
-        // Derive the YYYY-MM-DD day that the session's endTs falls on (UTC).
-        let fmt = DateFormatter()
-        fmt.calendar = Calendar(identifier: .gregorian)
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        fmt.dateFormat = "yyyy-MM-dd"
-        let endDate = Date(timeIntervalSince1970: TimeInterval(session.endTs))
-        let day = fmt.string(from: endDate)
-
-        // Look up the daily row for that exact day.
-        let daily = (try? await store.dailyMetrics(deviceId: deviceId, from: day, to: day))?.first
-
+        let dayKey = Self.localDayString(for: date)
+        guard let session = await sleepSession(endingOnDay: dayKey) else { return nil }
+        let daily = await dailyMetric(forDay: dayKey)
         return (session: session, daily: daily)
+    }
+
+    /// Returns the most-recent sleep session paired with the `DailyMetric` for the day its
+    /// `endTs` falls on (local calendar day), or nil when there are no cached sessions.
+    func sleepDetail() async -> (session: CachedSleepSession, daily: DailyMetric?)? {
+        await sleepDetail(for: Date())
     }
 
     /// Returns up to `nights` most-recent sleep sessions, ordered oldest→newest, for the
@@ -357,9 +472,9 @@ final class MetricsRepository: ObservableObject {
         let sessions = (try? await store.sleepSessions(deviceId: deviceId,
                                                        from: windowStart,
                                                        to: windowEnd,
-                                                       limit: nights + 2)) ?? []
-        // sleepSessions returns ASC by startTs; take the last `nights` (most-recent), keep ASC order.
-        return Array(sessions.suffix(nights))
+                                                       limit: 40)) ?? []
+        let primary = Self.primarySessionsPerWakeDay(sessions)
+        return Array(primary.suffix(nights))
     }
 
     // MARK: - Raw HR series (downsampled stream, for Trends card + HeartRateDetailView)

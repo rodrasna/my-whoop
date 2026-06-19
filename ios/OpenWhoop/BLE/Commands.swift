@@ -102,8 +102,42 @@ public enum WhoopCommand: UInt8, CaseIterable {
          UInt8((epochSec >> 24) & 0xFF),
          0x00, 0x00]
     }
+}
 
-    /// COMMAND packet type byte (PacketType.COMMAND).
+// MARK: - Alarm response parsing
+
+enum AlarmResponseParser {
+    static func isOk(_ payload: [UInt8]) -> Bool {
+        payload.count >= 2 && payload[0] == 0x0a && payload[1] == 0x01
+    }
+
+    static func epoch(from payload: [UInt8]) -> UInt32? {
+        guard isOk(payload) else { return nil }
+        if payload.count >= 9, payload[2] == 0x01 {
+            let e = u32LE(payload, at: 3)
+            return isPlausibleUnix(e) ? e : (e == 0 ? 0 : nil)
+        }
+        if payload.count >= 6 {
+            let e = u32LE(payload, at: 2)
+            if e == 0 || isPlausibleUnix(e) { return e }
+        }
+        return nil
+    }
+
+    private static func isPlausibleUnix(_ epoch: UInt32) -> Bool {
+        epoch >= 1_700_000_000 && epoch <= 2_100_000_000
+    }
+
+    private static func u32LE(_ bytes: [UInt8], at offset: Int) -> UInt32 {
+        guard offset + 4 <= bytes.count else { return 0 }
+        return UInt32(bytes[offset])
+            | (UInt32(bytes[offset + 1]) << 8)
+            | (UInt32(bytes[offset + 2]) << 16)
+            | (UInt32(bytes[offset + 3]) << 24)
+    }
+}
+
+extension WhoopCommand {
     static let commandType: UInt8 = 35
 
     /// Build a complete, framed COMMAND packet ready to write to char 61080002.

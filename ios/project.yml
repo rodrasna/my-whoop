@@ -14,6 +14,8 @@ targets:
     type: application
     platform: iOS
     sources: [OpenWhoop]
+    resources:
+      - OpenWhoop/Mobility/ExerciseImages
     configFiles:
       Debug: OpenWhoop/Config/Secrets.xcconfig
       Release: OpenWhoop/Config/Secrets.xcconfig
@@ -46,6 +48,8 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources: [OpenWhoopTests]
+    resources:
+      - OpenWhoopTests/Fixtures
     dependencies:
       - target: OpenWhoop
       - package: WhoopProtocol

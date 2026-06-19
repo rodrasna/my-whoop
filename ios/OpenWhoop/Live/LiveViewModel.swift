@@ -26,6 +26,7 @@ public final class LiveViewModel: ObservableObject {
         if !ProcessInfo.processInfo.arguments.contains("-demoPreview") {
             SyncNudge.requestAuthorization()
             RecoveryNotifier.requestAuthorization()
+            AlarmNotifier.requestAuthorization()
         }
         s.$lastSyncedAt
             .compactMap { $0 }
@@ -34,12 +35,16 @@ public final class LiveViewModel: ObservableObject {
         ble.onStrapReady = { [weak self] in
             Task { @MainActor in self?.restoreStrapAlarmIfNeeded() }
         }
+        ble.onFirmwareAlarmResult = { [weak self] fireDate, verified in
+            Task { @MainActor in self?.handleFirmwareAlarmResult(fireDate: fireDate, verified: verified) }
+        }
         state.$bonded
             .filter { $0 }
             .sink { [weak self] _ in
                 Task { @MainActor in self?.restoreStrapAlarmIfNeeded() }
             }
             .store(in: &cancellables)
+        reschedulePendingAlarmFromStorage()
     }
 
     public func connect()  { ble.connect() }
@@ -70,41 +75,78 @@ public final class LiveViewModel: ObservableObject {
     // BLEManager reference. SmartAlarmController.schedule() still receives the BLEManager
     // directly (it holds it weakly); we hand it ours via armStrapAlarm(at:).
 
-    /// Arm the strap's firmware alarm for `date`.
+    /// Arm firmware alarm (best-effort) + in-app timer + local notification.
     @discardableResult
     public func armStrapAlarm(at date: Date, smartWake: Bool = false, leadMinutes: Int = 20) -> Bool {
-        guard ble.armStrapAlarm(at: date) else { return false }
-        if smartWake {
-            SmartAlarmController.shared.schedule(wakeBy: date, leadMinutes: leadMinutes, ble: ble)
+        guard date.timeIntervalSinceNow > 5 else { return false }
+        scheduleLocalAlarm(at: date, smartWake: smartWake, leadMinutes: leadMinutes)
+        _ = ble.armStrapAlarm(at: date)
+        return true
+    }
+
+    private func scheduleLocalAlarm(at date: Date, smartWake: Bool, leadMinutes: Int) {
+        StrapAlarmScheduler.shared.schedule(at: date) { [weak self] in
+            self?.ble.testAlarmBuzz()
+        }
+        AlarmNotifier.schedule(at: date)
+        let lead = max(5, leadMinutes)
+        let minutesUntil = date.timeIntervalSinceNow / 60.0
+        if smartWake && minutesUntil >= Double(lead) {
+            SmartAlarmController.shared.schedule(wakeBy: date, leadMinutes: lead, ble: ble)
         } else {
             SmartAlarmController.shared.cancel()
         }
-        return true
+    }
+
+    /// Re-arm app timer + notification after cold start (no BLE required).
+    private func reschedulePendingAlarmFromStorage() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: AlarmKeys.enabled) else { return }
+        let fireDate = AlarmKeys.nextFireDate(
+            hour: defaults.integer(forKey: AlarmKeys.wakeByHour),
+            minute: defaults.integer(forKey: AlarmKeys.wakeByMinute)
+        )
+        guard fireDate.timeIntervalSinceNow > 5 else { return }
+        let smartWake = defaults.bool(forKey: AlarmKeys.smartWakeEnabled)
+        let lead = defaults.integer(forKey: AlarmKeys.smartWakeLeadMin)
+        scheduleLocalAlarm(at: fireDate, smartWake: smartWake, leadMinutes: lead)
     }
 
     /// Whether the strap accepted an arm request (connected + handshake done).
     public var canArmStrapAlarm: Bool { ble.isStrapReadyForCommands }
 
-    /// Disarm the currently-armed firmware alarm.
+    /// Last firmware verification from GET_ALARM_TIME on the strap.
+    public var firmwareAlarmVerified: Bool { state.firmwareAlarmVerified }
+
+    private func handleFirmwareAlarmResult(fireDate: Date, verified: Bool) {
+        guard UserDefaults.standard.bool(forKey: AlarmKeys.enabled) else { return }
+        if verified {
+            UserDefaults.standard.set(fireDate.timeIntervalSince1970, forKey: AlarmKeys.armedEpoch)
+        }
+    }
+
+    /// Disarm the currently-armed firmware alarm and cancel the in-app buzz timer.
     @discardableResult
-    public func disableStrapAlarm() -> Bool { ble.disableStrapAlarm() }
+    public func disableStrapAlarm() -> Bool {
+        StrapAlarmScheduler.shared.cancel()
+        AlarmNotifier.cancel()
+        SmartAlarmController.shared.cancel()
+        return ble.disableStrapAlarm()
+    }
 
     /// Re-program the firmware alarm after connect if UserDefaults still has one enabled.
     public func restoreStrapAlarmIfNeeded() {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: AlarmKeys.enabled) else { return }
-        let armed = defaults.double(forKey: AlarmKeys.armedEpoch)
-        guard armed > 0 else { return }
-        let fireDate = Date(timeIntervalSince1970: armed)
-        guard fireDate > Date().addingTimeInterval(5) else { return }
-        guard ble.armStrapAlarm(at: fireDate) else { return }
-        if defaults.bool(forKey: AlarmKeys.smartWakeEnabled) {
-            let lead = defaults.integer(forKey: AlarmKeys.smartWakeLeadMin)
-            SmartAlarmController.shared.schedule(
-                wakeBy: fireDate,
-                leadMinutes: max(5, lead),
-                ble: ble
-            )
+        let hour = defaults.integer(forKey: AlarmKeys.wakeByHour)
+        let minute = defaults.integer(forKey: AlarmKeys.wakeByMinute)
+        // Always schedule the *next* occurrence — armedEpoch may be this morning's fire time.
+        let fireDate = AlarmKeys.nextFireDate(hour: hour, minute: minute)
+        let smartWake = defaults.bool(forKey: AlarmKeys.smartWakeEnabled)
+        let lead = defaults.integer(forKey: AlarmKeys.smartWakeLeadMin)
+        scheduleLocalAlarm(at: fireDate, smartWake: smartWake, leadMinutes: lead)
+        if ble.armStrapAlarm(at: fireDate) {
+            defaults.set(fireDate.timeIntervalSince1970, forKey: AlarmKeys.armedEpoch)
         }
     }
 
@@ -120,7 +162,10 @@ public final class LiveViewModel: ObservableObject {
     }
 
     /// App became active — opportunistically sync (rate-limited; won't hammer on rapid toggles).
-    public func enterForeground() { ble.requestSync(.foreground) }
+    public func enterForeground() {
+        restoreStrapAlarmIfNeeded()
+        ble.requestSync(.foreground)
+    }
     /// User tapped "Sync now" — force an offload regardless of the periodic floor.
     public func syncNow() { ble.requestSync(.manual) }
 

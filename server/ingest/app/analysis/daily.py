@@ -295,13 +295,14 @@ def _nightly_signals(
     return out
 
 
-def _session_to_dict(s: _sleep.SleepSession) -> dict[str, Any]:
+def _session_to_dict(s: _sleep.SleepSession, *, kind: str = "main") -> dict[str, Any]:
     return {
         "start": s.start,
         "end": s.end,
         "efficiency": s.efficiency,
         "resting_hr": s.resting_hr,
         "avg_hrv": s.avg_hrv,
+        "kind": kind,
         "stages": [{"start": seg.start, "end": seg.end, "stage": seg.stage} for seg in s.stages],
     }
 
@@ -346,10 +347,12 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
 
     Consistency on recompute
     ------------------------
-    Before inserting, we DELETE the day's existing sleep_sessions (END date == day)
-    and exercise_sessions (start within the calendar day) and then insert the freshly
-    computed set — all in the caller's transaction — so a recompute that yields FEWER
-    sessions can't leave stale rows that desync ``daily_metrics.exercise_count``.
+    Sleep rows are always replaced. Exercise rows are replaced only when detection
+    finds sessions OR the day had none stored — if detection is empty but rows already
+    exist (e.g. morning recompute before afternoon HR sync), we keep the DB rows and
+    return them in ``exercises``. When detection finds sessions we DELETE then INSERT
+    so a recompute that yields FEWER sessions can't leave stale rows that desync
+    ``daily_metrics.exercise_count``.
 
     Returns ``{sleep_summary, recovery, strain, exercises, hrv, resting_hr}`` (or the
     no_data marker above).
@@ -360,19 +363,26 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
 
     # ── Sleep (over the sleep-aware window) ──────────────────────────────────
     sessions = _sleep.detect_sleep(streams)
-    sleep_summary = _sleep.daily_sleep_summary(sessions, day)
+    night_sessions = _sleep.sessions_for_day(sessions, day, window_end=win_end)
+    sleep_summary = _sleep.daily_sleep_summary(sessions, day, window_end=win_end)
     resting_hr = sleep_summary["resting_hr"]
-
-    # Sessions whose END falls on `day` are the night we attribute to this day.
-    night_sessions = [s for s in sessions if _sleep._end_date_utc(s) == day]
 
     # ── Empty-day skip ───────────────────────────────────────────────────────
     # No sleep night ending on `day` AND no HR/gravity samples in the calendar day
     # → there is genuinely nothing to attribute; don't write a degenerate row.
     day_streams = _slice_day(streams, day_start, day_end)
     has_day_streams = bool(day_streams.get("hr") or day_streams.get("gravity"))
+    existing_ex_count = read.count_exercise_sessions_for_day(conn, device_id, day)
     if not night_sessions and not has_day_streams:
-        return {"status": "no_data", "date": day.isoformat()}
+        if existing_ex_count == 0:
+            return {"status": "no_data", "date": day.isoformat()}
+        # Streams for the calendar day are gone (e.g. partial sync) but workouts were
+        # already persisted — do not rewrite sleep/metrics; echo stored sessions.
+        return {
+            "status": "preserved",
+            "date": day.isoformat(),
+            "exercises": read.query_exercises_for_day(conn, device_id, day),
+        }
 
     # ── Nightly HRV (last-SWS tiered RMSSD; primary avg_hrv) ──────────────────
     # Replace the sleep module's coarse 5-min-window HRV mean with the rebuilt
@@ -411,10 +421,21 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
     # Sleep efficiency (0..1) as the sleep-performance proxy.
     sleep_perf: float | None = sleep_summary.get("efficiency")
 
+    # Until the personal HRV baseline is fully trusted (≥14 nights), prefer the
+    # higher of in-bed session HRV vs tiered nightly RMSSD — last-SWS RMSSD often
+    # reads much lower on a wrist strap during calibration.
+    recovery_hrv = avg_hrv
+    hrv_bl = baselines.get("hrv") if isinstance(baselines, dict) else getattr(baselines, "hrv", None)
+    if isinstance(hrv_bl, _baselines.BaselineState) and not hrv_bl.trusted:
+        session_hrv = sleep_summary.get("avg_hrv")
+        candidates = [v for v in (session_hrv, avg_hrv) if v is not None and math.isfinite(v)]
+        if candidates:
+            recovery_hrv = max(candidates)
+
     recovery = None
-    if avg_hrv is not None and resting_hr is not None:
+    if recovery_hrv is not None and resting_hr is not None:
         recovery = _recovery.recovery_score(
-            avg_hrv,
+            recovery_hrv,
             resting_hr,
             night_resp,       # may be None → resp term dropped
             baselines,
@@ -472,8 +493,10 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
     signals = _nightly_signals(conn, device_id, day, streams, night_start, night_end)
 
     # ── Persist (idempotent upserts) ─────────────────────────────────────────
-    night_dicts = [_session_to_dict(s) for s in night_sessions]
+    night_dicts = [_session_to_dict(s, kind=k)
+                   for s, k in _sleep.sessions_labeled_for_day(sessions, day, window_end=win_end)]
     ex_dicts = [_exercise_to_dict(e) for e in all_exercises]
+    persisted_ex_count = len(ex_dicts) if ex_dicts else existing_ex_count
     metrics = {
         "total_sleep_min": sleep_summary["total_sleep_min"],
         "efficiency": sleep_summary["efficiency"],
@@ -485,7 +508,7 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         "avg_hrv": avg_hrv,
         "recovery": recovery,
         "strain": strain_val,
-        "exercise_count": len(ex_dicts),
+        "exercise_count": persisted_ex_count,
         "sleep_start": sleep_summary["sleep_start"],
         "sleep_end": sleep_summary["sleep_end"],
         "spo2_pct": signals["spo2_pct"],
@@ -497,10 +520,22 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
     # Delete the day's existing session rows first, then insert the fresh set, so a
     # recompute yielding FEWER sessions can't leave stale rows (which would desync
     # daily_metrics.exercise_count). All in the caller's transaction → atomic.
-    store.delete_sessions_for_day(conn, device_id, day)
+    # Sleep: always replace. Exercise: only wipe when we detected sessions OR day had none
+    # (avoids empty recompute erasing workouts before afternoon HR sync lands).
+    store.delete_sleep_sessions_for_day(conn, device_id, day)
     store.upsert_daily_metrics(conn, device_id, day, metrics)
     store.upsert_sleep_sessions(conn, device_id, night_dicts)
-    store.upsert_exercise_sessions(conn, device_id, ex_dicts)
+    preserved_exercises = False
+    if ex_dicts or existing_ex_count == 0:
+        store.delete_exercise_sessions_for_day(conn, device_id, day)
+        if ex_dicts:
+            store.upsert_exercise_sessions(conn, device_id, ex_dicts)
+    else:
+        preserved_exercises = True
+
+    response_exercises = ex_dicts
+    if preserved_exercises:
+        response_exercises = read.query_exercises_for_day(conn, device_id, day)
 
     # ── Return JSON-serializable summary (date → ISO string) ─────────────────
     summary = dict(sleep_summary)
@@ -509,7 +544,7 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         "sleep_summary": summary,
         "recovery": recovery,
         "strain": strain_val,
-        "exercises": ex_dicts,
+        "exercises": response_exercises,
         "hrv": avg_hrv,
         "resting_hr": resting_hr,
         "spo2_pct": signals["spo2_pct"],

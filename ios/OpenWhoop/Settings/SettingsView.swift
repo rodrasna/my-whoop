@@ -102,6 +102,12 @@ struct SettingsView: View {
     @State private var saveStatus: SaveStatus = .idle
     @State private var isBackfilling = false
 
+    // Morning check-in reminder
+    @State private var checkInReminderEnabled = SleepCheckInNotifier.isEnabled
+    @State private var checkInReminderTime = SleepCheckInNotifier.defaultReminderDate
+    @State private var coachLLMEnabled = CoachLLMSettings.isEnabled
+    @State private var coachIncludeNote = CoachLLMSettings.includeDayNote
+
     private enum SaveStatus: Equatable {
         case idle
         case saving
@@ -138,6 +144,8 @@ struct SettingsView: View {
                 weightSection
                 ageSection
                 sexSection
+                checkInReminderSection
+                coachLLMSection
                 saveSection
                 demoPreviewSection
                 footerSection
@@ -150,6 +158,52 @@ struct SettingsView: View {
         }
         .preferredColorScheme(.dark)
         .task { await loadProfile() }
+        .onAppear {
+            checkInReminderEnabled = SleepCheckInNotifier.isEnabled
+            checkInReminderTime = SleepCheckInNotifier.defaultReminderDate
+            coachLLMEnabled = CoachLLMSettings.isEnabled
+            coachIncludeNote = CoachLLMSettings.includeDayNote
+        }
+    }
+
+    private var coachLLMSection: some View {
+        Section {
+            Toggle("Narrativa con IA", isOn: $coachLLMEnabled)
+                .onChange(of: coachLLMEnabled) { CoachLLMSettings.isEnabled = $0 }
+            if coachLLMEnabled {
+                Toggle("Incluir nota del día en el prompt", isOn: $coachIncludeNote)
+                    .onChange(of: coachIncludeNote) { CoachLLMSettings.includeDayNote = $0 }
+            }
+        } header: {
+            Text("Coach de entreno")
+        } footer: {
+            Text("Genera un párrafo en el servidor a partir del análisis determinista. Máximo una llamada IA por día. Sin clave OpenAI en el servidor se usa texto plantilla.")
+        }
+    }
+
+    private var checkInReminderSection: some View {
+        Section {
+            Toggle("Recordatorio matutino", isOn: $checkInReminderEnabled)
+                .onChange(of: checkInReminderEnabled) { enabled in
+                    SleepCheckInNotifier.isEnabled = enabled
+                    SleepCheckInNotifier.reschedule()
+                }
+            if checkInReminderEnabled {
+                DatePicker("Hora",
+                           selection: $checkInReminderTime,
+                           displayedComponents: .hourAndMinute)
+                    .onChange(of: checkInReminderTime) { date in
+                        let cal = Calendar.current
+                        SleepCheckInNotifier.reminderHour = cal.component(.hour, from: date)
+                        SleepCheckInNotifier.reminderMinute = cal.component(.minute, from: date)
+                        SleepCheckInNotifier.reschedule()
+                    }
+            }
+        } header: {
+            Text("Cuestionario de sueño")
+        } footer: {
+            Text("Te recuerda cada mañana contrastar cómo dormiste con recovery y eficiencia de la pulsera.")
+        }
     }
 
     // MARK: - Form sections

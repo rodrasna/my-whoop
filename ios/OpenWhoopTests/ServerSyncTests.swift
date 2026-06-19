@@ -36,6 +36,42 @@ final class ServerSyncTests: XCTestCase {
         XCTAssertEqual(frac, a, "fractional seconds truncate to same whole second")
         XCTAssertEqual(epochB, epochA + 1, "consecutive seconds differ by 1")
         XCTAssertNil(ServerSync.parseEpoch("not-a-date"))
+        // Postgres / FastAPI often serializes local offsets (e.g. Europe/Madrid summer).
+        let cet = ServerSync.parseEpoch("2026-06-18T14:59:11+02:00")
+        XCTAssertNotNil(cet)
+    }
+
+    func testGetWorkoutsDecodesCETOffsetTimestamps() async throws {
+        let body = """
+        [{
+            "device_id": "my-whoop",
+            "start_ts": "2026-06-18T14:59:11+02:00",
+            "end_ts": "2026-06-18T15:45:34+02:00",
+            "avg_hr": 111.8,
+            "peak_hr": 156,
+            "strain": 10.79,
+            "kind": null,
+            "duration_s": 2783,
+            "zone_time_pct": {"0":23.1},
+            "avg_hrr_pct": 63.9,
+            "hrmax": 142.0,
+            "hrmax_source": "caller",
+            "calories_kcal": null,
+            "calories_kj": null
+        }]
+        """
+        StubURLProtocol.reset(bodies: ["/v1/workouts": body])
+
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let workouts = await sync.getWorkouts(from: "2026-06-18", to: "2026-06-18")
+
+        XCTAssertEqual(workouts.count, 1)
+        XCTAssertEqual(workouts[0].peakHr, 156)
+        XCTAssertEqual(workouts[0].startTs, ServerSync.parseEpoch("2026-06-18T14:59:11+02:00"))
     }
 
     // MARK: - decoded pull upserts + advances read-highwater
@@ -695,5 +731,71 @@ final class ServerSyncTests: XCTestCase {
 
         let ok = await sync.backfillWorkouts(from: "2026-03-29", to: "2026-05-28")
         XCTAssertFalse(ok, "backfillWorkouts must return false on non-2xx")
+    }
+
+    func testPutDayPlanPostsCorrectPayload() async throws {
+        StubURLProtocol.reset(responses: ["/v1/day-plan": 200], bodies: [:])
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let plan = WorkoutDayPlan(
+            primaryWorkoutId: "my-whoop|1000",
+            activityType: .crossfit,
+            crossfitStyle: .qualifier,
+            blocksDone: [.metcon],
+            note: "Open 26.2"
+        )
+        let ok = await sync.putDayPlan(dayKey: "2026-06-16", plan: plan)
+        XCTAssertTrue(ok)
+
+        let req = StubURLProtocol.captured.first { $0.url.path.hasSuffix("/v1/day-plan") }
+        XCTAssertEqual(req?.method, "PUT")
+        let body = try XCTUnwrap(req?.bodyData)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["device"] as? String, "my-whoop")
+        XCTAssertEqual(json["day"] as? String, "2026-06-16")
+        XCTAssertEqual(json["activity_type"] as? String, "crossfit")
+        XCTAssertEqual(json["blocks_done"] as? [String], ["metcon"])
+    }
+
+    func testDeleteDayPlanUsesDeleteMethod() async throws {
+        StubURLProtocol.reset(responses: ["/v1/day-plan": 200], bodies: [:])
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let ok = await sync.deleteDayPlan(dayKey: "2026-06-16")
+        XCTAssertTrue(ok)
+
+        let req = StubURLProtocol.captured.first { $0.url.path.hasSuffix("/v1/day-plan") }
+        XCTAssertEqual(req?.method, "DELETE")
+        XCTAssertTrue(req?.url.query?.contains("day=2026-06-16") == true)
+    }
+
+    func testPutMobilityCompletionPostsCorrectPayload() async throws {
+        StubURLProtocol.reset(responses: ["/v1/mobility-completion": 200], bodies: [:])
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let entry = MobilityCompletionEntry(
+            dayKey: "2026-06-16",
+            sessionKind: .preWorkout,
+            exerciseCount: 8,
+            completedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let ok = await sync.putMobilityCompletion(entry)
+        XCTAssertTrue(ok)
+
+        let req = StubURLProtocol.captured.first { $0.url.path.hasSuffix("/v1/mobility-completion") }
+        XCTAssertEqual(req?.method, "POST")
+        let body = try XCTUnwrap(req?.bodyData)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["session_kind"] as? String, "preWorkout")
+        XCTAssertEqual(json["exercise_count"] as? Int, 8)
     }
 }

@@ -153,9 +153,11 @@ enum SleepQualityBuilder {
 
     /// 0–100: menor variación de hora de acostarse = mayor regularidad.
     static func regularityScore(from sessions: [CachedSleepSession]) -> Double? {
-        guard sessions.count >= 3 else { return nil }
+        let nights = sessions.filter { $0.isMainNight }
+        let pool = nights.isEmpty ? sessions.filter { !$0.isNap } : nights
+        guard pool.count >= 3 else { return nil }
         let cal = Calendar.current
-        let minutes: [Double] = sessions.map { session in
+        let minutes: [Double] = pool.map { session in
             let d = Date(timeIntervalSince1970: TimeInterval(session.startTs))
             let c = cal.dateComponents([.hour, .minute], from: d)
             return Double((c.hour ?? 0) * 60 + (c.minute ?? 0))
@@ -163,11 +165,21 @@ enum SleepQualityBuilder {
         let mean = minutes.reduce(0, +) / Double(minutes.count)
         let variance = minutes.map { pow($0 - mean, 2) }.reduce(0, +) / Double(minutes.count)
         let stdDev = sqrt(variance)
-        // 0 min std → 100; 90+ min std → ~0
         return max(0, min(100, 100 - stdDev * 1.1))
     }
 
     static func regularityContext(score: Double, nights: Int) -> String {
-        "Basado en \(nights) noches · \(Int(score.rounded()))% de consistencia horaria"
+        if nights < 3 {
+            return "Necesitas al menos 3 noches para medir consistencia"
+        }
+        if score < 5 {
+            return "Horarios de acostarte muy distintos entre noches (o sesiones erróneas en el historial)"
+        }
+        let band: String = {
+            if score >= 85 { return "Horario muy consistente" }
+            if score >= 70 { return "Razonablemente regular" }
+            return "Horario irregular"
+        }()
+        return "\(band) · \(nights) noches · \(Int(score.rounded()))% consistencia"
     }
 }

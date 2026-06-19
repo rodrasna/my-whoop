@@ -76,6 +76,22 @@ public final class BLEManager: NSObject, ObservableObject {
     private var connectHandshakeDone = false
     /// Called once per BLE connect after the handshake (hello, SET_CLOCK, …) completes.
     var onStrapReady: (() -> Void)?
+    /// `(fireDate, verified)` — verified=true when GET_ALARM_TIME matches the target.
+    var onFirmwareAlarmResult: ((Date, Bool) -> Void)?
+
+    // MARK: Firmware alarm arming (sequenced SET_CLOCK → SET_ALARM → GET_ALARM verify)
+    private struct PendingArm {
+        let targetEpoch: UInt32
+        let fireDate: Date
+        var attempt: Int
+    }
+    private enum ArmPhase: Equatable {
+        case idle, disabling, settingClock, clockSettling, settingAlarm(UInt32), verifying(UInt32)
+    }
+    private var pendingArm: PendingArm?
+    private var armPhase: ArmPhase = .idle
+    private var armStepTimer: DispatchWorkItem?
+    private static let maxArmAttempts = 3
 
     /// True when alarm commands can be sent to the strap.
     var isStrapReadyForCommands: Bool {
@@ -127,6 +143,7 @@ public final class BLEManager: NSObject, ObservableObject {
         )
         // Strap-as-clock: an incoming EVENT packet kicks a rate-limited catch-up sync.
         router.onSyncTrigger = { [weak self] in self?.requestSync(.strap) }
+        router.onFirmwareAlarmEvent = { [weak self] ev in self?.handleFirmwareAlarmEvent(ev) }
     }
 
     /// Build the WhoopStore + Collector + Backfiller asynchronously. Safe to call multiple
@@ -167,6 +184,7 @@ public final class BLEManager: NSObject, ObservableObject {
         )
         // Strap-as-clock: an incoming EVENT packet kicks a rate-limited catch-up sync.
         router.onSyncTrigger = { [weak self] in self?.requestSync(.strap) }
+        router.onFirmwareAlarmEvent = { [weak self] ev in self?.handleFirmwareAlarmEvent(ev) }
     }
 
     // MARK: Public API
@@ -367,6 +385,7 @@ public final class BLEManager: NSObject, ObservableObject {
             state.lastSyncedAt = Date().timeIntervalSince1970
             UserDefaults.standard.set(state.lastSyncedAt, forKey: "lastSyncedAt")
         }
+        flushPendingArmIfNeeded()
         checkStrapLiveness()         // safety-net: strap ahead of us AND our frontier frozen ⇒ stuck?
     }
 
@@ -497,34 +516,37 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// Arm the strap's firmware alarm for `date` (UTC).
     ///
-    /// Sequence: SET_CLOCK first to ensure the strap RTC is UTC-correct, then SET_ALARM_TIME.
-    /// The strap will buzz at `date` even if the app is backgrounded or force-quit
-    /// (event STRAP_DRIVEN_ALARM_EXECUTED=57). This is the guaranteed fixed-time fallback path —
-    /// the smart-wake layer (`SmartAlarmController`) fires on top of this if conditions are met,
-    /// but this firmware alarm always fires as the safety net.
-    ///
-    /// Returns false when the strap is not connected / handshake not done.
+    /// Sequence: DISABLE → SET_CLOCK (wait for latch) → SET_ALARM_TIME → GET_ALARM_TIME verify.
+    /// Deferred while a historical offload is running — alarm commands are unreliable mid-sync.
+    /// The strap will buzz at `date` even if the app is force-quit (event STRAP_DRIVEN_ALARM_EXECUTED=57).
     @discardableResult
     func armStrapAlarm(at date: Date) -> Bool {
         guard isStrapReadyForCommands else {
             log("Alarm: arm skipped — strap not ready (connected=\(state.connected) handshake=\(connectHandshakeDone))")
             return false
         }
-        let epochSec = UInt32(date.timeIntervalSince1970)
-        send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self, self.isStrapReadyForCommands else { return }
-            self.send(.setAlarmTime, payload: WhoopCommand.setAlarmPayload(epochSec: epochSec),
-                      writeType: .withResponse)
-            self.log("Alarm: armed for \(date) (epoch \(epochSec))")
-            self.getStrapAlarm()
+        guard date.timeIntervalSinceNow > 5 else {
+            log("Alarm: arm skipped — fire time too soon")
+            return false
         }
+        let epochSec = UInt32(date.timeIntervalSince1970)
+        pendingArm = PendingArm(targetEpoch: epochSec, fireDate: date, attempt: 0)
+        state.firmwareAlarmVerified = false
+        if backfilling {
+            log("Alarm: defer arm until backfill completes (target \(date))")
+            return true
+        }
+        startArmSequence()
         return true
     }
 
     /// Disarm the currently-armed firmware alarm.
     @discardableResult
     func disableStrapAlarm() -> Bool {
+        cancelArmSequence()
+        pendingArm = nil
+        state.firmwareAlarmEpoch = nil
+        state.firmwareAlarmVerified = false
         guard isStrapReadyForCommands else {
             log("Alarm: disarm skipped — strap not ready")
             return false
@@ -534,24 +556,13 @@ public final class BLEManager: NSObject, ObservableObject {
         return true
     }
 
-    /// Request the currently-armed alarm time from the strap (response arrives on cmd-notify char).
-    /// Parsing the reply is optional/bonus — the raw bytes will appear in the BLE log.
+    /// Request the currently-armed alarm time from the strap.
     func getStrapAlarm() {
-        send(.getAlarmTime, payload: [0x01])
+        send(.getAlarmTime, payload: [0x01], writeType: .withResponse)
         log("Alarm: requested current alarm time")
     }
 
     /// Fire an immediate alarm buzz on the strap for testing.
-    ///
-    /// Uses RUN_HAPTICS_PATTERN (cmd 79) with patternId=2, 3 loops — the same pattern the official
-    /// WHOOP app uses for alarms (verified: patternId=2, observed for interoperability), plus RUN_ALARM
-    /// (cmd 68) as a belt-and-suspenders. patternId=2 gives the characteristic graduated alarm buzz.
-    ///
-    /// Alternative waveform form (12-byte):
-    ///   [wfe1=47, wfe2=152, 0,0,0,0,0,0, loop u16=0, overall_loop=7, dur=30]
-    /// — note for future refinement; the preset id=2 form is simpler and confirmed to buzz on-device.
-    ///
-    /// Haptic firing cannot be verified in the simulator (no strap motor). Test on-device only.
     func testAlarmBuzz() {
         guard isStrapReadyForCommands else {
             log("Alarm: test buzz skipped — strap not ready")
@@ -562,6 +573,155 @@ public final class BLEManager: NSObject, ObservableObject {
             self?.send(.runAlarm, payload: [0x01], writeType: .withResponse)
         }
         log("Alarm: test buzz fired (patternId=2, runAlarm)")
+    }
+
+    // MARK: Firmware alarm state machine (private)
+
+    private func flushPendingArmIfNeeded() {
+        guard pendingArm != nil, !backfilling, armPhase == .idle else { return }
+        startArmSequence()
+    }
+
+    private func startArmSequence() {
+        guard var pending = pendingArm else { return }
+        cancelArmStepTimer()
+        pending.attempt += 1
+        pendingArm = pending
+        armPhase = .disabling
+        log("Alarm: arm sequence attempt \(pending.attempt)/\(Self.maxArmAttempts) for \(pending.fireDate)")
+        send(.disableAlarm, payload: [0x01], writeType: .withResponse)
+        scheduleArmStep(after: 0.6) { [weak self] in self?.advanceArmAfterDisable() }
+    }
+
+    private func advanceArmAfterDisable() {
+        guard pendingArm != nil, armPhase == .disabling else { return }
+        cancelArmStepTimer()
+        armPhase = .settingClock
+        send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
+        scheduleArmStep(after: 2.5) { [weak self] in self?.retryArmOrFail("SET_CLOCK timeout") }
+    }
+
+    private func advanceArmAfterClockSettle() {
+        guard let pending = pendingArm, armPhase == .clockSettling else { return }
+        cancelArmStepTimer()
+        armPhase = .settingAlarm(pending.targetEpoch)
+        send(.setAlarmTime, payload: WhoopCommand.setAlarmPayload(epochSec: pending.targetEpoch),
+             writeType: .withResponse)
+        scheduleArmStep(after: 2.5) { [weak self] in self?.retryArmOrFail("SET_ALARM timeout") }
+    }
+
+    private func advanceArmToVerify() {
+        guard let pending = pendingArm else { return }
+        cancelArmStepTimer()
+        armPhase = .verifying(pending.targetEpoch)
+        getStrapAlarm()
+        scheduleArmStep(after: 2.5) { [weak self] in self?.retryArmOrFail("GET_ALARM verify timeout") }
+    }
+
+    private func confirmArmSuccess(epoch: UInt32) {
+        guard let pending = pendingArm, epoch == pending.targetEpoch else { return }
+        let fireDate = pending.fireDate
+        cancelArmStepTimer()
+        armPhase = .idle
+        pendingArm = nil
+        state.firmwareAlarmEpoch = epoch
+        state.firmwareAlarmVerified = true
+        log("Alarm: firmware verified on strap (epoch \(epoch))")
+        onFirmwareAlarmResult?(fireDate, true)
+    }
+
+    private func failArm(_ reason: String) {
+        cancelArmStepTimer()
+        armPhase = .idle
+        let fireDate = pendingArm?.fireDate
+        pendingArm = nil
+        state.firmwareAlarmVerified = false
+        log("Alarm: firmware arm failed — \(reason)")
+        if let fireDate { onFirmwareAlarmResult?(fireDate, false) }
+    }
+
+    private func retryArmOrFail(_ reason: String) {
+        guard let pending = pendingArm else { return }
+        if pending.attempt >= Self.maxArmAttempts {
+            failArm(reason)
+            return
+        }
+        log("Alarm: retrying (\(reason))")
+        startArmSequence()
+    }
+
+    private func cancelArmSequence() {
+        cancelArmStepTimer()
+        armPhase = .idle
+    }
+
+    private func scheduleArmStep(after seconds: TimeInterval, block: @escaping () -> Void) {
+        cancelArmStepTimer()
+        let item = DispatchWorkItem(block: block)
+        armStepTimer = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    private func cancelArmStepTimer() {
+        armStepTimer?.cancel()
+        armStepTimer = nil
+    }
+
+    private func handleFirmwareAlarmEvent(_ name: String) {
+        log("Alarm: strap event \(name)")
+        if name.hasPrefix("STRAP_DRIVEN_ALARM_SET"), let epoch = pendingArm?.targetEpoch {
+            confirmArmSuccess(epoch: epoch)
+        }
+        if name.hasPrefix("STRAP_DRIVEN_ALARM_EXECUTED") {
+            log("Alarm: strap firmware alarm fired")
+        }
+        if name.hasPrefix("STRAP_DRIVEN_ALARM_DISABLED") {
+            state.firmwareAlarmEpoch = nil
+            state.firmwareAlarmVerified = false
+        }
+    }
+
+    /// Route COMMAND_RESPONSE frames for the alarm arm sequence.
+    private func handleAlarmCommandResponse(_ frame: [UInt8]) {
+        guard frame.count > 10, frame[4] == 36 else { return } // COMMAND_RESPONSE
+        let respCmd = frame[6]
+        let pay = Array(frame[7..<(frame.count - 4)])
+
+        switch (armPhase, respCmd) {
+        case (.disabling, WhoopCommand.disableAlarm.rawValue):
+            advanceArmAfterDisable()
+        case (.settingClock, WhoopCommand.setClock.rawValue):
+            guard AlarmResponseParser.isOk(pay) else {
+                retryArmOrFail("SET_CLOCK rejected")
+                return
+            }
+            cancelArmStepTimer()
+            armPhase = .clockSettling
+            scheduleArmStep(after: 1.5) { [weak self] in self?.advanceArmAfterClockSettle() }
+        case (.settingAlarm(let target), WhoopCommand.setAlarmTime.rawValue):
+            guard AlarmResponseParser.isOk(pay) else {
+                retryArmOrFail("SET_ALARM rejected")
+                return
+            }
+            if let echoed = AlarmResponseParser.epoch(from: pay), echoed == target {
+                confirmArmSuccess(epoch: target)
+            } else {
+                advanceArmToVerify()
+            }
+        case (.verifying(let target), WhoopCommand.getAlarmTime.rawValue):
+            if let read = AlarmResponseParser.epoch(from: pay), read == target {
+                confirmArmSuccess(epoch: target)
+            } else {
+                retryArmOrFail("GET_ALARM mismatch (got \(AlarmResponseParser.epoch(from: pay) ?? 0), want \(target))")
+            }
+        default:
+            break
+        }
+
+        if armPhase == .idle, respCmd == WhoopCommand.getAlarmTime.rawValue,
+           let read = AlarmResponseParser.epoch(from: pay), read > 0 {
+            state.firmwareAlarmEpoch = read
+        }
     }
 
     /// Parse a standard BLE Heart Rate Measurement (0x2A37) via the pure StandardHeartRate parser.
@@ -840,6 +1000,7 @@ extension BLEManager: CBPeripheralDelegate {
              BLEManager.eventNotifyChar:
             // Reassemble (no-op for already-complete frames) then route each complete frame.
             for frame in reassembler.feed(bytes) {
+                if frame.count > 4, frame[4] == 36 { handleAlarmCommandResponse(frame) }
                 router.handle(frame: frame)                       // UI (always)
                 if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,
                    let newest = BLEManager.dataRangeNewestUnix(from: frame) {

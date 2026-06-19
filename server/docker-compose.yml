@@ -39,6 +39,8 @@ services:
       - SUGARWOD_EMAIL=${SUGARWOD_EMAIL:-}
       - SUGARWOD_PASSWORD=${SUGARWOD_PASSWORD:-}
       - SUGARWOD_TRACK=${SUGARWOD_TRACK:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - TZ=${TZ:-UTC}
     volumes:
       - ${DATA_ROOT}/whoop/raw:/data/raw

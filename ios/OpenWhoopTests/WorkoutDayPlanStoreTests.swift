@@ -4,6 +4,11 @@ import XCTest
 @MainActor
 final class WorkoutDayPlanStoreTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: "com.openwhoop.workoutDayPlans.v1")
+    }
+
     func testResolveUsesSavedPlanOverInference() {
         let store = WorkoutDayPlanStore()
         let labels = ActivityLabelStore()

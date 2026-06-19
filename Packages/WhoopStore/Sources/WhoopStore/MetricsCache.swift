@@ -18,12 +18,18 @@ public struct CachedSleepSession: Equatable, Codable {
     public let restingHr: Int?
     public let avgHrv: Double?
     public let stagesJSON: String?
+    /// ``main`` = primary night (recovery, ring, 7-night chart); ``nap`` = siesta/descanso.
+    public let kind: String?
     public init(startTs: Int, endTs: Int, efficiency: Double?, restingHr: Int?,
-                avgHrv: Double?, stagesJSON: String?) {
+                avgHrv: Double?, stagesJSON: String?, kind: String? = "main") {
         self.startTs = startTs; self.endTs = endTs
         self.efficiency = efficiency; self.restingHr = restingHr
         self.avgHrv = avgHrv; self.stagesJSON = stagesJSON
+        self.kind = kind
     }
+
+    public var isMainNight: Bool { (kind ?? "main") == "main" }
+    public var isNap: Bool { kind == "nap" }
 }
 
 /// One cached daily-metrics row pulled from the server's /v1/daily. Natural key (deviceId, day).
@@ -68,16 +74,17 @@ extension WhoopStore {
             for s in sessions {
                 try db.execute(sql: """
                     INSERT INTO sleepSession
-                        (deviceId, startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (deviceId, startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON, kind)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(deviceId, startTs) DO UPDATE SET
                         endTs = excluded.endTs,
                         efficiency = excluded.efficiency,
                         restingHr = excluded.restingHr,
                         avgHrv = excluded.avgHrv,
-                        stagesJSON = excluded.stagesJSON
+                        stagesJSON = excluded.stagesJSON,
+                        kind = excluded.kind
                     """, arguments: [deviceId, s.startTs, s.endTs, s.efficiency,
-                                     s.restingHr, s.avgHrv, s.stagesJSON])
+                                     s.restingHr, s.avgHrv, s.stagesJSON, s.kind ?? "main"])
                 n += db.changesCount
             }
             return n
@@ -127,14 +134,15 @@ extension WhoopStore {
     public func sleepSessions(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [CachedSleepSession] {
         try syncRead { db in
             try Row.fetchAll(db, sql: """
-                SELECT startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON FROM sleepSession
+                SELECT startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON, kind FROM sleepSession
                 WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
                 ORDER BY startTs ASC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
                 .map {
                     CachedSleepSession(startTs: $0["startTs"], endTs: $0["endTs"],
                                        efficiency: $0["efficiency"], restingHr: $0["restingHr"],
-                                       avgHrv: $0["avgHrv"], stagesJSON: $0["stagesJSON"])
+                                       avgHrv: $0["avgHrv"], stagesJSON: $0["stagesJSON"],
+                                       kind: $0["kind"])
                 }
         }
     }

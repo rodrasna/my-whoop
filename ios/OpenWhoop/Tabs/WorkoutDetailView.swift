@@ -15,6 +15,8 @@ struct WorkoutDetailView: View {
     @EnvironmentObject private var metrics: MetricsRepository
     @State private var showPicker = false
     @State private var showDayEditor = false
+    @State private var coachReport: TrainingDayCoachReport?
+    @State private var coachNarrative: String?
 
     private var effectiveType: ActivityType? { labelStore.effectiveType(for: workout) }
     private var activityOnlyType: ActivityType? { labelStore.activityOnlyType(for: workout) }
@@ -46,6 +48,7 @@ struct WorkoutDetailView: View {
                     structureSection
                     statsStrip
                     zoneSection
+                    coachInsightsSection
                     contextSection
                     Spacer(minLength: WH.Spacing.xl)
                 }
@@ -69,6 +72,7 @@ struct WorkoutDetailView: View {
                     workouts: dayWorkouts,
                     labelStore: labelStore,
                     dayPlanStore: dayPlanStore,
+                    programStore: PRVNProgramStore.shared,
                     prvnDay: prvnDay,
                     isTrainingBout: { w in
                         !labelStore.isDismissed(w.id)
@@ -81,6 +85,31 @@ struct WorkoutDetailView: View {
                     }
                 )
             }
+        }
+        .onChange(of: showDayEditor) { open in
+            if !open, let dayKey {
+                Task { await loadCoachReport(recompute: true) }
+            }
+        }
+        .task(id: dayKey) {
+            await loadCoachReport()
+        }
+    }
+
+    @ViewBuilder
+    private var coachInsightsSection: some View {
+        if let coachReport, coachReport.primaryWorkoutId == workout.id {
+            TrainingCoachCard(report: coachReport, narrative: coachNarrative, embedded: true)
+        }
+    }
+
+    private func loadCoachReport(recompute: Bool = false) async {
+        guard let dayKey, metrics.isServerConfigured else { return }
+        coachReport = await metrics.coachReport(forDay: dayKey, recompute: recompute)
+        if CoachLLMSettings.isEnabled {
+            coachNarrative = await metrics.coachNarrative(forDay: dayKey)?.narrative
+        } else {
+            coachNarrative = nil
         }
     }
 

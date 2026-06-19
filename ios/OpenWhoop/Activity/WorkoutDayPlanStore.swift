@@ -11,6 +11,10 @@ struct WorkoutDayPlan: Codable, Equatable {
     /// Bloques que realmente hiciste (p. ej. solo WOD en un clasificatorio).
     var blocksDone: [ProgramBlockKind] = []
     var note: String?
+    /// PRVN de otro día (yyyy-MM-dd) cuando hiciste el WOD de sábado un domingo, etc.
+    var prvnReferenceDayKey: String?
+    /// Sin entreno hoy — movilidad y recomendaciones usan descanso.
+    var isRestDay: Bool = false
 
     var hasContent: Bool {
         primaryWorkoutId != nil
@@ -18,6 +22,8 @@ struct WorkoutDayPlan: Codable, Equatable {
             || crossfitStyle != nil
             || !blocksDone.isEmpty
             || !(note?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || !(prvnReferenceDayKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || isRestDay
     }
 }
 
@@ -34,6 +40,8 @@ struct ResolvedDayWorkout: Equatable {
 
 @MainActor
 final class WorkoutDayPlanStore: ObservableObject {
+
+    static let shared = WorkoutDayPlanStore()
 
     private static let key = "com.openwhoop.workoutDayPlans.v1"
 

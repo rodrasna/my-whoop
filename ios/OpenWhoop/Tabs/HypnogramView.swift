@@ -65,49 +65,57 @@ struct HypnogramView: View {
                 .padding(.top, WH.Spacing.xs)
 
             if let stages, nightDuration > 0 {
+                let chartMinWidth = max(320, CGFloat(nightDuration / 60) * 5)
                 VStack(spacing: 0) {
-                    // Label sidebar + track columns
-                    HStack(alignment: .top, spacing: WH.Spacing.sm) {
-                        // Fixed-width label column
-                        VStack(alignment: .trailing, spacing: 3) {
-                            ForEach(laneOrder, id: \.self) { lane in
-                                Text(laneLabel(lane))
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundStyle(stageColor(lane).opacity(0.85))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.6)
-                                    .frame(height: 28)
-                            }
-                        }
-                        .frame(width: 52)
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        VStack(spacing: 0) {
+                            HStack(alignment: .top, spacing: WH.Spacing.sm) {
+                                VStack(alignment: .trailing, spacing: 3) {
+                                    ForEach(laneOrder, id: \.self) { lane in
+                                        Text(laneLabel(lane))
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .foregroundStyle(stageColor(lane).opacity(0.85))
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.6)
+                                            .frame(height: 28)
+                                    }
+                                }
+                                .frame(width: 52)
 
-                        // Track area
-                        VStack(spacing: 3) {
-                            ForEach(laneOrder, id: \.self) { lane in
-                                laneTrack(
-                                    lane: lane,
-                                    stages: stages,
+                                VStack(spacing: 3) {
+                                    ForEach(laneOrder, id: \.self) { lane in
+                                        laneTrack(
+                                            lane: lane,
+                                            stages: stages,
+                                            nightStart: nightStart,
+                                            nightDuration: nightDuration
+                                        )
+                                    }
+                                }
+                                .frame(width: chartMinWidth)
+                                .clipShape(RoundedRectangle(cornerRadius: WH.Radius.small, style: .continuous))
+                            }
+
+                            HStack(spacing: WH.Spacing.sm) {
+                                Spacer().frame(width: 52 + WH.Spacing.sm)
+                                timeAxis(
                                     nightStart: nightStart,
+                                    nightEnd: nightEnd,
                                     nightDuration: nightDuration
                                 )
+                                .frame(width: chartMinWidth)
                             }
                         }
-                        .clipShape(RoundedRectangle(cornerRadius: WH.Radius.small, style: .continuous))
-                    }
-
-                    // Time axis (inset to align with track area)
-                    HStack(spacing: WH.Spacing.sm) {
-                        Spacer().frame(width: 52 + WH.Spacing.sm)
-                        timeAxis(
-                            nightStart: nightStart,
-                            nightEnd: nightEnd,
-                            nightDuration: nightDuration
-                        )
+                        .frame(minWidth: chartMinWidth + 52 + WH.Spacing.sm)
                     }
                 }
                 .padding(WH.Spacing.md)
                 .background(WH.Color.surface,
                             in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+
+                Text("Desliza horizontalmente para ver toda la noche")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(WH.Color.textSecondary)
 
                 // Legend
                 hypnogramLegend

@@ -83,7 +83,7 @@ struct WorkoutHRChartView: View {
                 LineMark(x: .value("Hora", pt.date), y: .value("lpm", pt.value))
                     .foregroundStyle(hrColor)
                     .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .interpolationMethod(.catmullRom)
+                    .interpolationMethod(.linear)
             }
 
             if let sel = selected {
@@ -150,6 +150,11 @@ struct WorkoutHRChartView: View {
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(WH.Color.recoveryRed)
             }
+            if hasDataGaps {
+                Text("Huecos = sin lectura del strap")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
+            }
             Spacer()
             Text("\(formatDuration(workout.durationS)) de sesión")
                 .font(.system(size: 10, weight: .medium))
@@ -159,6 +164,18 @@ struct WorkoutHRChartView: View {
 
     private var sessionRangeLabel: String {
         "\(hourLabel(boutStart)) – \(hourLabel(boutEnd))"
+    }
+
+    /// True when consecutive HR samples are >45 s apart (strap gap or downsampling hole).
+    private var hasDataGaps: Bool {
+        guard points.count >= 2 else { return false }
+        let sorted = points.sorted { $0.date < $1.date }
+        for i in 1..<sorted.count {
+            if sorted[i].date.timeIntervalSince(sorted[i - 1].date) > 45 {
+                return true
+            }
+        }
+        return false
     }
 
     private var yDomain: ClosedRange<Double> {
@@ -173,7 +190,10 @@ struct WorkoutHRChartView: View {
         isLoading = true
         let from = Int(chartStart.timeIntervalSince1970)
         let to = Int(chartEnd.timeIntervalSince1970)
-        let raw = await metrics.hrSeries(fromEpoch: from, toEpoch: to, maxPoints: 300)
+        let spanSec = max(60, to - from)
+        // ~1 point per 5 s of workout window (cap 1800) — avoids bucket-averaging artifacts.
+        let maxPts = min(1800, max(400, spanSec / 5))
+        let raw = await metrics.hrSeries(fromEpoch: from, toEpoch: to, maxPoints: maxPts)
         points = raw.filter { pt in
             pt.date >= chartStart && pt.date <= chartEnd
         }

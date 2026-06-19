@@ -22,11 +22,15 @@ struct OpenWhoopApp: App {
 private struct AppRoot: View {
     @StateObject private var metrics = MetricsRepository(deviceId: AppConfig.deviceId)
     @StateObject private var live    = LiveViewModel(deviceId: AppConfig.deviceId)
+    @StateObject private var tabRouter = RootTabRouter()
+    @ObservedObject private var dayPlanStore = WorkoutDayPlanStore.shared
 
     var body: some View {
         RootTabView()
             .environmentObject(metrics)
             .environmentObject(live)
+            .environmentObject(tabRouter)
+            .environmentObject(dayPlanStore)
             .task {
                 // Screenshot seed: only when launched with -demoPreview (e.g. simulator captures).
                 if ProcessInfo.processInfo.arguments.contains("-demoPreview") {
@@ -34,6 +38,8 @@ private struct AppRoot: View {
                 } else {
                     await metrics.syncPRVNProgramIfSunday()
                 }
+                SleepCheckInNotifier.requestAuthorization()
+                SleepCheckInNotifier.reschedule()
             }
     }
 }

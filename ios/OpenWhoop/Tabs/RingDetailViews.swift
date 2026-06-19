@@ -11,9 +11,20 @@ enum RingDestination: String, Identifiable, Hashable {
 // MARK: - SleepRingDetailView
 
 struct SleepRingDetailView: View {
+    let anchorDate: Date
+
     @EnvironmentObject private var metrics: MetricsRepository
     @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
     @State private var weekRows: [DailyMetric] = []
+    @State private var weekNights: [CachedSleepSession] = []
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(anchorDate)
+    }
+
+    private var dayLabel: String {
+        TodayMetricHelpers.todayLabel(for: anchorDate, isViewingToday: isViewingToday)
+    }
 
     private var scorePercent: Double? {
         if let e = detail?.session.efficiency, e > 0 { return e * 100 }
@@ -34,6 +45,10 @@ struct SleepRingDetailView: View {
                     }
 
                     if metrics.isDemoPreviewActive { previewChip }
+
+                    if let insight = sleepInsightText {
+                        RingInsightCard(text: insight)
+                    }
 
                     if let detail {
                         sleepMetricsCard(session: detail.session, daily: detail.daily)
@@ -59,16 +74,34 @@ struct SleepRingDetailView: View {
                 .padding(WH.Spacing.md)
             }
         }
-        .navigationTitle("Sueño")
+        .navigationTitle("Sueño · \(dayLabel)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
-        .task { await load() }
+        .task(id: anchorDate) { await load() }
     }
 
     private func load() async {
-        detail = await metrics.sleepDetail()
-        weekRows = await metrics.dailyLastDays(7)
+        let dayKey = MetricsRepository.localDayString(for: anchorDate)
+        let sleep = await metrics.sleepSession(endingOnDay: dayKey)
+        let daily = await metrics.dailyMetric(forDay: dayKey)
+        if let sleep {
+            detail = (session: sleep, daily: daily)
+        } else {
+            detail = nil
+        }
+        weekRows = await metrics.dailyLastDays(7, endingOn: anchorDate)
+        weekNights = await metrics.sevenNightSleepWake(nights: 7)
+    }
+
+    private var sleepInsightText: String? {
+        let reg = SleepQualityBuilder.regularityScore(from: weekNights)
+        guard let ctx = RingInsightCopy.sleepContext(
+            session: detail?.session,
+            daily: detail?.daily,
+            regularityPct: reg
+        ) else { return nil }
+        return RingInsightCopy.sleep(ctx)
     }
 
     private func sleepMetricsCard(session: CachedSleepSession, daily: DailyMetric?) -> some View {
@@ -96,27 +129,37 @@ struct SleepRingDetailView: View {
 // MARK: - RecoveryRingDetailView
 
 struct RecoveryRingDetailView: View {
+    let anchorDate: Date
+
     @EnvironmentObject private var metrics: MetricsRepository
     @State private var weekRows: [DailyMetric] = []
     @State private var nightCount = 0
+    @State private var dayMetric: DailyMetric?
+    @State private var nightSleep: CachedSleepSession?
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(anchorDate)
+    }
+
+    private var dayLabel: String {
+        TodayMetricHelpers.todayLabel(for: anchorDate, isViewingToday: isViewingToday)
+    }
 
     private var recoveryPct: Double? {
         TodayMetricHelpers.recoveryPercent(
-            sleep: metrics.lastNight,
-            daily: metrics.today,
+            sleep: nightSleep,
+            daily: dayMetric,
             sleepNights: nightCount
         )?.percent
     }
 
     private var recoveryProvisional: Bool {
         TodayMetricHelpers.recoveryPercent(
-            sleep: metrics.lastNight,
-            daily: metrics.today,
+            sleep: nightSleep,
+            daily: dayMetric,
             sleepNights: nightCount
         )?.provisional ?? false
     }
-
-    private var sleep: CachedSleepSession? { metrics.lastNight }
 
     var body: some View {
         ZStack {
@@ -142,26 +185,30 @@ struct RecoveryRingDetailView: View {
 
                     if metrics.isDemoPreviewActive { previewChip }
 
+                    if let pct = recoveryPct {
+                        RingInsightCard(text: RingInsightCopy.recovery(percent: pct, provisional: recoveryProvisional))
+                    }
+
                     DashboardCard {
-                        metricRow(label: "Recuperación hoy",
+                        metricRow(label: "Recuperación · \(dayLabel)",
                                   value: recoveryPct.map { "\(Int($0.rounded()))%" } ?? "—",
                                   subtitle: recoveryProvisional ? "provisional · calibrando" : yesterdayRecoveryLabel)
                         DashboardDivider()
                         metricRow(label: "VFC",
                                   value: hrvValue,
-                                  subtitle: TodayMetricHelpers.sleepWindowLabel(sleep: sleep) ?? "de anoche")
+                                  subtitle: TodayMetricHelpers.sleepWindowLabel(sleep: nightSleep) ?? "de anoche")
                         DashboardDivider()
                         metricRow(label: "FC en reposo",
                                   value: rhrValue,
                                   subtitle: "durante el sueño")
                         DashboardDivider()
                         metricRow(label: "SpO₂",
-                                  value: metrics.today?.spo2Pct.map { String(format: "%.0f%%", $0) } ?? "—",
-                                  subtitle: "hoy")
+                                  value: dayMetric?.spo2Pct.map { String(format: "%.0f%%", $0) } ?? "—",
+                                  subtitle: dayLabel)
                         DashboardDivider()
                         metricRow(label: "Respiración",
-                                  value: metrics.today?.respRateBpm.map { String(format: "%.1f rpm", $0) } ?? "—",
-                                  subtitle: "hoy")
+                                  value: dayMetric?.respRateBpm.map { String(format: "%.1f rpm", $0) } ?? "—",
+                                  subtitle: dayLabel)
                     }
 
                     ringWeekChart(
@@ -182,31 +229,35 @@ struct RecoveryRingDetailView: View {
                 .padding(WH.Spacing.md)
             }
         }
-        .navigationTitle("Recuperación")
+        .navigationTitle("Recuperación · \(dayLabel)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
-        .task { await load() }
+        .task(id: anchorDate) { await load() }
     }
 
     private var hrvValue: String {
-        TodayMetricHelpers.hrvMs(sleep: sleep, daily: metrics.today)
+        TodayMetricHelpers.hrvMs(sleep: nightSleep, daily: dayMetric)
             .map { String(format: "%.0f ms", $0) } ?? "—"
     }
 
     private var rhrValue: String {
-        TodayMetricHelpers.restingHr(sleep: sleep, daily: metrics.today)
+        TodayMetricHelpers.restingHr(sleep: nightSleep, daily: dayMetric)
             .map { "\($0) lpm" } ?? "—"
     }
 
     private var yesterdayRecoveryLabel: String? {
-        guard weekRows.count >= 2,
-              let y = weekRows.dropLast().last?.recovery else { return nil }
-        return "ayer \(Int((y * 100).rounded()))%"
+        let key = MetricsRepository.localDayString(for: anchorDate)
+        guard let idx = weekRows.firstIndex(where: { $0.day == key }), idx > 0,
+              let y = weekRows[idx - 1].recovery else { return nil }
+        return "día anterior \(Int((y * 100).rounded()))%"
     }
 
     private func load() async {
-        weekRows = await metrics.dailyLastDays(7)
+        let dayKey = MetricsRepository.localDayString(for: anchorDate)
+        dayMetric = await metrics.dailyMetric(forDay: dayKey)
+        nightSleep = await metrics.sleepSession(endingOnDay: dayKey)
+        weekRows = await metrics.dailyLastDays(7, endingOn: anchorDate)
         nightCount = await metrics.sleepNightCount()
     }
 }
@@ -214,11 +265,22 @@ struct RecoveryRingDetailView: View {
 // MARK: - StrainRingDetailView
 
 struct StrainRingDetailView: View {
+    let anchorDate: Date
+
     @EnvironmentObject private var metrics: MetricsRepository
     @State private var weekRows: [DailyMetric] = []
-    @State private var todayKcal: Double?
+    @State private var dayMetric: DailyMetric?
+    @State private var dayKcal: Double?
 
-    private var strain: Double? { metrics.today?.strain }
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(anchorDate)
+    }
+
+    private var dayLabel: String {
+        TodayMetricHelpers.todayLabel(for: anchorDate, isViewingToday: isViewingToday)
+    }
+
+    private var strain: Double? { dayMetric?.strain }
 
     var body: some View {
         ZStack {
@@ -234,19 +296,23 @@ struct StrainRingDetailView: View {
 
                     if metrics.isDemoPreviewActive { previewChip }
 
+                    if let s = strain {
+                        RingInsightCard(text: RingInsightCopy.strain(s))
+                    }
+
                     DashboardCard {
-                        metricRow(label: "Esfuerzo hoy",
+                        metricRow(label: "Esfuerzo · \(dayLabel)",
                                   value: strain.map {
                                       "\(WH.Ring.strainPercent($0))% · \(String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",")) / 21"
                                   } ?? "—",
                                   subtitle: yesterdayStrainLabel)
                         DashboardDivider()
-                        metricRow(label: "Calorías hoy",
-                                  value: todayKcal.map { "\(Int($0.rounded())) kcal" } ?? "—",
+                        metricRow(label: "Calorías",
+                                  value: dayKcal.map { "\(Int($0.rounded())) kcal" } ?? "—",
                                   subtitle: "de entrenos detectados")
                         DashboardDivider()
-                        metricRow(label: "Entrenos hoy",
-                                  value: metrics.today?.exerciseCount.map { "\($0)" } ?? "—",
+                        metricRow(label: "Entrenos",
+                                  value: dayMetric?.exerciseCount.map { "\($0)" } ?? "—",
                                   subtitle: "sesiones con esfuerzo")
                     }
 
@@ -268,25 +334,27 @@ struct StrainRingDetailView: View {
                 .padding(WH.Spacing.md)
             }
         }
-        .navigationTitle("Esfuerzo")
+        .navigationTitle("Esfuerzo · \(dayLabel)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
-        .task { await load() }
+        .task(id: anchorDate) { await load() }
     }
 
     private var yesterdayStrainLabel: String? {
-        guard weekRows.count >= 2,
-              let y = weekRows.dropLast().last?.strain else { return nil }
-        return String(format: "ayer %.1f", y).replacingOccurrences(of: ".", with: ",")
+        let key = MetricsRepository.localDayString(for: anchorDate)
+        guard let idx = weekRows.firstIndex(where: { $0.day == key }), idx > 0,
+              let y = weekRows[idx - 1].strain else { return nil }
+        return String(format: "día anterior %.1f", y).replacingOccurrences(of: ".", with: ",")
     }
 
     private func load() async {
-        weekRows = await metrics.dailyLastDays(7)
-        let today = MetricsRepository.utcDayString(for: Date())
-        let workouts = await metrics.workouts(from: today, to: today)
+        let dayKey = MetricsRepository.localDayString(for: anchorDate)
+        dayMetric = await metrics.dailyMetric(forDay: dayKey)
+        weekRows = await metrics.dailyLastDays(7, endingOn: anchorDate)
+        let workouts = await metrics.workouts(from: dayKey, to: dayKey)
         let kcal = workouts.compactMap(\.caloriesKcal).reduce(0, +)
-        todayKcal = kcal > 0 ? kcal : nil
+        dayKcal = kcal > 0 ? kcal : nil
     }
 }
 

@@ -371,3 +371,226 @@ def test_recompute_with_fewer_sessions_is_consistent(clean_db):
         assert _ex_count_for_day(conn) == second_count
         rows = read.query_daily(conn, DEVICE, DAY, DAY)
         assert rows[0]["exercise_count"] == second_count
+
+
+@requires_docker
+def test_recompute_empty_detection_preserves_existing_exercises(clean_db):
+    """If detection yields zero sessions but rows already exist, keep them."""
+    prev = DAY - _dt.timedelta(days=1)
+    night_start = _epoch(prev, 22, 0)
+    night = _merge(
+        _active_block(night_start, 20, bpm0=78),
+        _still_block(night_start + 20 * 60, 120, bpm=56),
+        _still_block(night_start + 140 * 60, 80, bpm=49, dip=True),
+        _still_block(night_start + 220 * 60, 150, bpm=55),
+        _still_block(night_start + 370 * 60, 60, bpm=52, dip=True),
+        _active_block(night_start + 430 * 60, 15, bpm0=80),
+    )
+    workout = _active_block(_epoch(DAY, 10, 0), 30, bpm0=140)
+    with psycopg.connect(clean_db) as conn:
+        store.ensure_device(conn, DEVICE)
+        store.upsert_streams(conn, DEVICE, _merge(night, workout))
+        conn.commit()
+        first = daily.compute_day(conn, DEVICE, DAY)
+        conn.commit()
+        first_count = len(first["exercises"])
+        assert first_count >= 1
+
+    day_start = _epoch(DAY, 0, 0)
+    day_end = day_start + 24 * 3600
+    with psycopg.connect(clean_db) as conn, conn.cursor() as cur:
+        for tbl in ("hr_samples", "gravity_samples"):
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE device_id=%s "
+                "AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)",
+                (DEVICE, day_start, day_end))
+        conn.commit()
+
+    with psycopg.connect(clean_db) as conn:
+        second = daily.compute_day(conn, DEVICE, DAY)
+        conn.commit()
+        assert len(second["exercises"]) == first_count
+        assert _ex_count_for_day(conn) == first_count
+        rows = read.query_daily(conn, DEVICE, DAY, DAY)
+        assert rows[0]["exercise_count"] == first_count
+
+
+@requires_docker
+def test_recompute_empty_detection_preserves_idempotent(clean_db):
+    """Two empty recomputes in a row keep the same stored sessions."""
+    prev = DAY - _dt.timedelta(days=1)
+    night_start = _epoch(prev, 22, 0)
+    night = _merge(
+        _active_block(night_start, 20, bpm0=78),
+        _still_block(night_start + 20 * 60, 120, bpm=56),
+        _still_block(night_start + 140 * 60, 80, bpm=49, dip=True),
+        _still_block(night_start + 220 * 60, 150, bpm=55),
+        _still_block(night_start + 370 * 60, 60, bpm=52, dip=True),
+        _active_block(night_start + 430 * 60, 15, bpm0=80),
+    )
+    workout = _active_block(_epoch(DAY, 10, 0), 30, bpm0=140)
+    with psycopg.connect(clean_db) as conn:
+        store.ensure_device(conn, DEVICE)
+        store.upsert_streams(conn, DEVICE, _merge(night, workout))
+        conn.commit()
+        first = daily.compute_day(conn, DEVICE, DAY)
+        conn.commit()
+        first_count = len(first["exercises"])
+        assert first_count >= 1
+
+    day_start = _epoch(DAY, 0, 0)
+    day_end = day_start + 24 * 3600
+    with psycopg.connect(clean_db) as conn, conn.cursor() as cur:
+        for tbl in ("hr_samples", "gravity_samples"):
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE device_id=%s "
+                "AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)",
+                (DEVICE, day_start, day_end))
+        conn.commit()
+
+    for _ in range(2):
+        with psycopg.connect(clean_db) as conn:
+            result = daily.compute_day(conn, DEVICE, DAY)
+            conn.commit()
+            assert len(result["exercises"]) == first_count
+            assert _ex_count_for_day(conn) == first_count
+
+
+@requires_docker
+def test_recompute_after_preservation_updates_when_hr_returns(clean_db):
+    """When HR streams return after a preserve pass, detection replaces stored rows."""
+    prev = DAY - _dt.timedelta(days=1)
+    night_start = _epoch(prev, 22, 0)
+    night = _merge(
+        _active_block(night_start, 20, bpm0=78),
+        _still_block(night_start + 20 * 60, 120, bpm=56),
+        _still_block(night_start + 140 * 60, 80, bpm=49, dip=True),
+        _still_block(night_start + 220 * 60, 150, bpm=55),
+        _still_block(night_start + 370 * 60, 60, bpm=52, dip=True),
+        _active_block(night_start + 430 * 60, 15, bpm0=80),
+    )
+    workout = _active_block(_epoch(DAY, 10, 0), 30, bpm0=140)
+    streams = _merge(night, workout)
+    with psycopg.connect(clean_db) as conn:
+        store.ensure_device(conn, DEVICE)
+        store.upsert_streams(conn, DEVICE, streams)
+        conn.commit()
+        first = daily.compute_day(conn, DEVICE, DAY)
+        conn.commit()
+        assert len(first["exercises"]) >= 1
+
+    day_start = _epoch(DAY, 0, 0)
+    day_end = day_start + 24 * 3600
+    with psycopg.connect(clean_db) as conn, conn.cursor() as cur:
+        for tbl in ("hr_samples", "gravity_samples"):
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE device_id=%s "
+                "AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)",
+                (DEVICE, day_start, day_end))
+        conn.commit()
+
+    with psycopg.connect(clean_db) as conn:
+        empty = daily.compute_day(conn, DEVICE, DAY)
+        conn.commit()
+        preserved = len(empty["exercises"])
+        assert preserved >= 1
+
+    with psycopg.connect(clean_db) as conn:
+        store.upsert_streams(conn, DEVICE, streams)
+        conn.commit()
+        restored = daily.compute_day(conn, DEVICE, DAY)
+        conn.commit()
+        assert len(restored["exercises"]) >= 1
+        assert _ex_count_for_day(conn) == len(restored["exercises"])
+
+
+@requires_docker
+def test_preservation_is_per_device(clean_db):
+    """Empty recompute on device B must not touch device A sessions."""
+    other = "devDailyOther"
+    prev = DAY - _dt.timedelta(days=1)
+    night_start = _epoch(prev, 22, 0)
+    night = _merge(
+        _active_block(night_start, 20, bpm0=78),
+        _still_block(night_start + 20 * 60, 120, bpm=56),
+        _still_block(night_start + 140 * 60, 80, bpm=49, dip=True),
+        _still_block(night_start + 220 * 60, 150, bpm=55),
+        _still_block(night_start + 370 * 60, 60, bpm=52, dip=True),
+        _active_block(night_start + 430 * 60, 15, bpm0=80),
+    )
+    workout = _active_block(_epoch(DAY, 10, 0), 30, bpm0=140)
+    with psycopg.connect(clean_db) as conn:
+        for dev in (DEVICE, other):
+            store.ensure_device(conn, dev)
+            store.upsert_streams(conn, dev, _merge(night, workout))
+        conn.commit()
+        for dev in (DEVICE, other):
+            daily.compute_day(conn, dev, DAY)
+        conn.commit()
+
+    day_start = _epoch(DAY, 0, 0)
+    day_end = day_start + 24 * 3600
+    with psycopg.connect(clean_db) as conn, conn.cursor() as cur:
+        for tbl in ("hr_samples", "gravity_samples"):
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE device_id=%s "
+                "AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)",
+                (other, day_start, day_end))
+        conn.commit()
+
+    with psycopg.connect(clean_db) as conn:
+        daily.compute_day(conn, other, DAY)
+        conn.commit()
+        cur = conn.execute(
+            """SELECT COUNT(*) FROM exercise_sessions
+               WHERE device_id = %s
+               AND start_ts >= %s::date AT TIME ZONE 'UTC'
+               AND start_ts < (%s::date + INTERVAL '1 day') AT TIME ZONE 'UTC'""",
+            (DEVICE, DAY, DAY),
+        )
+        assert int(cur.fetchone()[0]) >= 1
+
+
+@requires_docker
+def test_compute_daily_endpoint_returns_preserved_exercises(client, clean_db):
+    """POST /v1/compute-daily must echo preserved sessions, not an empty list."""
+    prev = DAY - _dt.timedelta(days=1)
+    night_start = _epoch(prev, 22, 0)
+    night = _merge(
+        _active_block(night_start, 20, bpm0=78),
+        _still_block(night_start + 20 * 60, 120, bpm=56),
+        _still_block(night_start + 140 * 60, 80, bpm=49, dip=True),
+        _still_block(night_start + 220 * 60, 150, bpm=55),
+        _still_block(night_start + 370 * 60, 60, bpm=52, dip=True),
+        _active_block(night_start + 430 * 60, 15, bpm0=80),
+    )
+    workout = _active_block(_epoch(DAY, 10, 0), 30, bpm0=140)
+    with psycopg.connect(clean_db) as conn:
+        store.ensure_device(conn, DEVICE)
+        store.upsert_streams(conn, DEVICE, _merge(night, workout))
+        conn.commit()
+
+    first = client.post(
+        "/v1/compute-daily", json={"device": DEVICE, "date": DAY.isoformat()}).json()
+    first_count = len(first["exercises"])
+    assert first_count >= 1
+
+    day_start = _epoch(DAY, 0, 0)
+    day_end = day_start + 24 * 3600
+    with psycopg.connect(clean_db) as conn, conn.cursor() as cur:
+        for tbl in ("hr_samples", "gravity_samples"):
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE device_id=%s "
+                "AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)",
+                (DEVICE, day_start, day_end))
+        conn.commit()
+
+    second = client.post(
+        "/v1/compute-daily", json={"device": DEVICE, "date": DAY.isoformat()}).json()
+    assert len(second["exercises"]) == first_count
+
+    workouts = client.get(
+        "/v1/workouts",
+        params={"device": DEVICE, "from": DAY.isoformat(), "to": DAY.isoformat()},
+    ).json()
+    assert len(workouts) == first_count

@@ -50,18 +50,63 @@ struct StressMonitorCard: View {
 
     private var statusBanner: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            Text(isCalibrating ? "Calibrando baseline" : "Estrés diurno")
+            Text(isCalibrating ? "Calibrando baseline" : stressLevelTitle)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(WH.Color.textPrimary)
             Text(statusMessage)
                 .font(WH.Font.caption)
                 .foregroundStyle(WH.Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if !isCalibrating, scoredPoints.count >= 2 {
+                stressLegend
+            }
         }
         .padding(WH.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WH.Color.surface2,
                     in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+    }
+
+    private var stressLevelTitle: String {
+        guard let avg = averageScore else { return "Estrés diurno" }
+        switch avg {
+        case ..<1.0: return "Estrés bajo hoy"
+        case ..<2.0: return "Estrés moderado"
+        default: return "Estrés elevado"
+        }
+    }
+
+    private var averageScore: Double? {
+        let vals = scoredPoints.compactMap(\.score)
+        guard !vals.isEmpty else { return nil }
+        return vals.reduce(0, +) / Double(vals.count)
+    }
+
+    private var stressLegend: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Escala 0–3 (solo en reposo)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(WH.Color.textSecondary)
+            HStack(spacing: WH.Spacing.sm) {
+                legendChip("0–1 bajo", color: WH.Color.stressLow)
+                legendChip("1–2 medio", color: WH.Color.stressMedium)
+                legendChip("2–3 alto", color: WH.Color.stressHigh)
+            }
+            Text("Sube cuando tu VFC baja y la FC sube respecto a tu baseline en momentos de reposo. Entrenos y movimiento no cuentan.")
+                .font(.system(size: 10))
+                .foregroundStyle(WH.Color.textSecondary.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, WH.Spacing.xs)
+    }
+
+    private func legendChip(_ label: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(WH.Color.textSecondary)
+        }
     }
 
     private var statusMessage: String {
@@ -73,9 +118,11 @@ struct StressMonitorCard: View {
             return "Baseline en construcción (\(scoredPoints.count) ventanas hoy). "
                 + "Sigue usando la pulsera en reposo; la curva se afina en unos días."
         }
-        if let peak = scoredPoints.max(by: { ($0.score ?? 0) < ($1.score ?? 0) }) {
+        if let peak = scoredPoints.max(by: { ($0.score ?? 0) < ($1.score ?? 0) }), let s = peak.score {
             let t = timeLabel(peak.ts)
-            return "Curva basada en HRV intradía y FC vs tu baseline. Mayor pico hoy: \(t)."
+            let band = s < 1 ? "bajo" : (s < 2 ? "moderado" : "alto")
+            return "Pico \(band) a las \(t) (\(String(format: "%.1f", s).replacingOccurrences(of: ".", with: ","))). "
+                + "Media del día: \(String(format: "%.1f", averageScore ?? s).replacingOccurrences(of: ".", with: ","))."
         }
         return "Curva basada en HRV intradía y FC. Los entrenos y el movimiento no cuentan como estrés."
     }

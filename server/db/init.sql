@@ -120,8 +120,10 @@ CREATE TABLE IF NOT EXISTS sleep_sessions (
     resting_hr  SMALLINT,
     avg_hrv     REAL,
     stages      JSONB,          -- [{start,end,stage}]
+    kind        TEXT NOT NULL DEFAULT 'main',  -- 'main' = primary night; 'nap' = siesta/descanso
     PRIMARY KEY (device_id, start_ts)
 );
+ALTER TABLE sleep_sessions ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'main';
 
 CREATE TABLE IF NOT EXISTS exercise_sessions (
     device_id     TEXT NOT NULL,
@@ -218,3 +220,70 @@ CREATE INDEX IF NOT EXISTS stress_samples_device_ts ON stress_samples (device_id
 
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS stress_avg  REAL;
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS stress_peak REAL;
+
+-- Subjective morning sleep check-ins (app questionnaire).
+CREATE TABLE IF NOT EXISTS sleep_check_ins (
+    device_id             TEXT NOT NULL,
+    day_key               TEXT NOT NULL,   -- local wake day YYYY-MM-DD
+    morning_feeling       SMALLINT NOT NULL,
+    onset                 TEXT NOT NULL,   -- easy | normal | hard
+    factors               JSONB NOT NULL DEFAULT '[]',
+    note                  TEXT,
+    saved_at              TIMESTAMPTZ NOT NULL,
+    recovery_pct          REAL,
+    sleep_efficiency_pct  REAL,
+    voice_transcript      TEXT,
+    analysis              JSONB,
+    PRIMARY KEY (device_id, day_key)
+);
+
+ALTER TABLE sleep_check_ins ADD COLUMN IF NOT EXISTS voice_transcript TEXT;
+ALTER TABLE sleep_check_ins ADD COLUMN IF NOT EXISTS analysis JSONB;
+
+-- Manual workout day plan (iOS → server for coach).
+CREATE TABLE IF NOT EXISTS workout_day_plans (
+    device_id          TEXT NOT NULL,
+    day_key            TEXT NOT NULL,
+    primary_workout_id TEXT,
+    activity_type      TEXT,
+    crossfit_style     TEXT,
+    blocks_done        JSONB NOT NULL DEFAULT '[]',
+    note               TEXT,
+    saved_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (device_id, day_key)
+);
+
+ALTER TABLE workout_day_plans ADD COLUMN IF NOT EXISTS prvn_reference_day_key TEXT;
+ALTER TABLE workout_day_plans ADD COLUMN IF NOT EXISTS is_rest_day BOOLEAN NOT NULL DEFAULT false;
+
+-- Guided mobility completions (iOS → server for coach / adherence).
+CREATE TABLE IF NOT EXISTS mobility_completions (
+    device_id      TEXT NOT NULL,
+    day_key        TEXT NOT NULL,
+    session_kind   TEXT NOT NULL,
+    exercise_count INTEGER NOT NULL,
+    completed_at   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (device_id, day_key, session_kind)
+);
+
+-- Cached deterministic coach reports (task-09 Phase A).
+CREATE TABLE IF NOT EXISTS coach_reports (
+    device_id   TEXT NOT NULL,
+    day_key     TEXT NOT NULL,
+    report      JSONB NOT NULL,
+    narrative   TEXT,
+    narrative_at TIMESTAMPTZ,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (device_id, day_key)
+);
+
+ALTER TABLE coach_reports ADD COLUMN IF NOT EXISTS narrative TEXT;
+ALTER TABLE coach_reports ADD COLUMN IF NOT EXISTS narrative_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS coach_explain_usage (
+    device_id  TEXT NOT NULL,
+    usage_day  DATE NOT NULL,
+    day_key    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (device_id, usage_day)
+);

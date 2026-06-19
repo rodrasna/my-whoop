@@ -222,11 +222,41 @@ def _sample_duration_minutes(hr_series: Sequence[dict]) -> float:
 
     Falls back to 1 s (1/60 min) when there are fewer than two samples or the
     first two timestamps coincide.
+
+    .. deprecated::
+        Prefer ``_sample_durations_minutes`` for accurate TRIMP over gaps.
     """
     if len(hr_series) < 2:
         return _FALLBACK_SAMPLE_MIN
     delta_s = abs(float(hr_series[1]["ts"]) - float(hr_series[0]["ts"]))
     return delta_s / 60.0 if delta_s else _FALLBACK_SAMPLE_MIN
+
+
+def _sample_durations_minutes(
+    hr_series: Sequence[dict],
+    *,
+    gap_cap_s: float = 120.0,
+) -> list[float]:
+    """Per-sample duration in minutes from timestamp deltas.
+
+    Gaps longer than ``gap_cap_s`` are treated as 1 s so idle/off-wrist periods
+    do not inflate strain. The last sample reuses the previous interval.
+    """
+    n = len(hr_series)
+    if n == 0:
+        return []
+    if n == 1:
+        return [_FALLBACK_SAMPLE_MIN]
+    out: list[float] = []
+    for i in range(n - 1):
+        delta_s = float(hr_series[i + 1]["ts"]) - float(hr_series[i]["ts"])
+        if delta_s <= 0:
+            delta_s = 1.0
+        elif delta_s > gap_cap_s:
+            delta_s = 1.0
+        out.append(delta_s / 60.0)
+    out.append(out[-1] if out else _FALLBACK_SAMPLE_MIN)
+    return out
 
 
 def _edwards_trimp(
@@ -235,11 +265,12 @@ def _edwards_trimp(
     hr_reserve: float,
     sample_duration_min: float,
 ) -> float:
-    """Edwards' zone TRIMP: Σ (sample_duration × zone_weight) over the window."""
-    weighted_samples = 0
-    for sample in hr_series:
-        weighted_samples += _zone_weight(sample["bpm"], resting_hr, hr_reserve)
-    return weighted_samples * sample_duration_min
+    """Edwards' zone TRIMP: Σ (zone_weight × sample_duration) over the window."""
+    durations = _sample_durations_minutes(hr_series)
+    trimp = 0.0
+    for sample, dur in zip(hr_series, durations):
+        trimp += _zone_weight(sample["bpm"], resting_hr, hr_reserve) * dur
+    return trimp
 
 
 def _banister_trimp(
@@ -255,11 +286,12 @@ def _banister_trimp(
     fractional %HRR (0..1). This continuously weights intensity, so a hard minute
     counts far more than an easy one without the step discontinuities of zones.
     """
+    durations = _sample_durations_minutes(hr_series)
     accumulated = 0.0
-    for sample in hr_series:
+    for sample, dur in zip(hr_series, durations):
         x = _pct_hrr(sample["bpm"], resting_hr, hr_reserve) / 100.0
         if x > 0.0:
-            accumulated += sample_duration_min * x * BANISTER_SCALE * math.exp(b * x)
+            accumulated += dur * x * BANISTER_SCALE * math.exp(b * x)
     return accumulated
 
 

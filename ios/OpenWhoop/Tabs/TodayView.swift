@@ -149,6 +149,12 @@ struct TodayView: View {
         return (r.percent / 100.0, r.provisional)
     }
 
+    private var todaySleepEfficiencyPct: Double? {
+        if let e = nightSleep?.efficiency, e > 0 { return e * 100 }
+        if let e = dayMetric?.efficiency, e > 0 { return e * 100 }
+        return nil
+    }
+
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
@@ -167,6 +173,19 @@ struct TodayView: View {
                               onRecoveryTap: { ringDestination = .recovery },
                               onStrainTap: { ringDestination = .strain })
                     .padding(.vertical, WH.Spacing.sm)
+
+                if isViewingToday {
+                    SleepCheckInCard(
+                        dayKey: MetricsRepository.localDayString(for: selectedDate),
+                        dayLabel: "Hoy",
+                        recoveryPct: dayMetric?.recovery,
+                        sleepEfficiencyPct: todaySleepEfficiencyPct
+                    )
+
+                    SleepCheckInCorrelationCard()
+
+                    MobilityTodayCard(sleepNights: sleepNights, weekRows: weekRows)
+                }
 
                 if sleepNights < 4 && !metrics.isDemoPreviewActive {
                     CalibrationBanner(
@@ -215,13 +234,13 @@ struct TodayView: View {
         .background(WH.Color.background)
         .background {
             Group {
-                NavigationLink(destination: SleepRingDetailView(),
+                NavigationLink(destination: SleepRingDetailView(anchorDate: selectedDate),
                                tag: RingDestination.sleep,
                                selection: $ringDestination) { EmptyView() }
-                NavigationLink(destination: RecoveryRingDetailView(),
+                NavigationLink(destination: RecoveryRingDetailView(anchorDate: selectedDate),
                                tag: RingDestination.recovery,
                                selection: $ringDestination) { EmptyView() }
-                NavigationLink(destination: StrainRingDetailView(),
+                NavigationLink(destination: StrainRingDetailView(anchorDate: selectedDate),
                                tag: RingDestination.strain,
                                selection: $ringDestination) { EmptyView() }
             }

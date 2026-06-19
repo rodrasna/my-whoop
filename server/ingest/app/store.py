@@ -143,6 +143,35 @@ def upsert_daily_metrics(conn: psycopg.Connection, device_id: str, day, metrics:
     )
 
 
+def delete_sleep_session(conn: psycopg.Connection, device_id: str, start_ts: float) -> int:
+    """Delete one sleep session by start epoch (PK). Returns rows deleted."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM sleep_sessions "
+            "WHERE device_id = %s AND start_ts = to_timestamp(%s)",
+            (device_id, start_ts),
+        )
+        return cur.rowcount
+
+
+def delete_sleep_sessions_for_day(conn: psycopg.Connection, device_id: str, day) -> None:
+    """Delete sleep sessions whose wake (end_ts UTC date) is ``day``."""
+    conn.execute(
+        "DELETE FROM sleep_sessions "
+        "WHERE device_id = %s AND (end_ts AT TIME ZONE 'UTC')::date = %s",
+        (device_id, day))
+
+
+def delete_exercise_sessions_for_day(conn: psycopg.Connection, device_id: str, day) -> None:
+    """Delete exercise sessions whose start_ts falls on calendar ``day`` (UTC)."""
+    conn.execute(
+        "DELETE FROM exercise_sessions "
+        "WHERE device_id = %s "
+        "AND start_ts >= %s::date AT TIME ZONE 'UTC' "
+        "AND start_ts <  (%s::date + INTERVAL '1 day') AT TIME ZONE 'UTC'",
+        (device_id, day, day))
+
+
 def delete_sessions_for_day(conn: psycopg.Connection, device_id: str, day) -> None:
     """Delete the existing derived session rows attributed to (device_id, day) so a
     recompute that yields FEWER sessions doesn't leave stale rows behind (which would
@@ -155,17 +184,8 @@ def delete_sessions_for_day(conn: psycopg.Connection, device_id: str, day) -> No
 
     Call inside compute_day's transaction, immediately before re-inserting the freshly
     computed set, so delete + insert commit atomically (idempotent recompute)."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM sleep_sessions "
-            "WHERE device_id = %s AND (end_ts AT TIME ZONE 'UTC')::date = %s",
-            (device_id, day))
-        cur.execute(
-            "DELETE FROM exercise_sessions "
-            "WHERE device_id = %s "
-            "AND start_ts >= %s::date AT TIME ZONE 'UTC' "
-            "AND start_ts <  (%s::date + INTERVAL '1 day') AT TIME ZONE 'UTC'",
-            (device_id, day, day))
+    delete_sleep_sessions_for_day(conn, device_id, day)
+    delete_exercise_sessions_for_day(conn, device_id, day)
 
 
 def upsert_sleep_sessions(conn: psycopg.Connection, device_id: str, sessions) -> None:
@@ -176,16 +196,18 @@ def upsert_sleep_sessions(conn: psycopg.Connection, device_id: str, sessions) ->
         for s in sessions:
             cur.execute(
                 """INSERT INTO sleep_sessions
-                   (device_id, start_ts, end_ts, efficiency, resting_hr, avg_hrv, stages)
-                   VALUES (%s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s)
+                   (device_id, start_ts, end_ts, efficiency, resting_hr, avg_hrv, stages, kind)
+                   VALUES (%s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s)
                    ON CONFLICT (device_id, start_ts) DO UPDATE SET
                      end_ts     = EXCLUDED.end_ts,
                      efficiency = EXCLUDED.efficiency,
                      resting_hr = EXCLUDED.resting_hr,
                      avg_hrv    = EXCLUDED.avg_hrv,
-                     stages     = EXCLUDED.stages""",
+                     stages     = EXCLUDED.stages,
+                     kind       = EXCLUDED.kind""",
                 (device_id, s["start"], s["end"], s.get("efficiency"),
-                 s.get("resting_hr"), s.get("avg_hrv"), json.dumps(s.get("stages") or [])))
+                 s.get("resting_hr"), s.get("avg_hrv"), json.dumps(s.get("stages") or []),
+                 s.get("kind") or "main"))
 
 
 def upsert_profile(conn: psycopg.Connection, device_id: str,
@@ -204,6 +226,31 @@ def upsert_profile(conn: psycopg.Connection, device_id: str,
              sex        = EXCLUDED.sex,
              updated_at = now()""",
         (device_id, height_cm, weight_kg, age, sex),
+    )
+
+
+def upsert_sleep_check_in(conn: psycopg.Connection, device_id: str, row: dict) -> None:
+    """Upsert one subjective morning check-in (PK device_id, day_key)."""
+    conn.execute(
+        """INSERT INTO sleep_check_ins
+           (device_id, day_key, morning_feeling, onset, factors, note,
+            saved_at, recovery_pct, sleep_efficiency_pct, voice_transcript, analysis)
+           VALUES (%s, %s, %s, %s, %s, %s, to_timestamp(%s), %s, %s, %s, %s)
+           ON CONFLICT (device_id, day_key) DO UPDATE SET
+             morning_feeling      = EXCLUDED.morning_feeling,
+             onset                = EXCLUDED.onset,
+             factors              = EXCLUDED.factors,
+             note                 = EXCLUDED.note,
+             saved_at             = EXCLUDED.saved_at,
+             recovery_pct         = EXCLUDED.recovery_pct,
+             sleep_efficiency_pct = EXCLUDED.sleep_efficiency_pct,
+             voice_transcript     = EXCLUDED.voice_transcript,
+             analysis             = EXCLUDED.analysis""",
+        (device_id, row["day_key"], row["morning_feeling"], row["onset"],
+         json.dumps(row.get("factors") or []), row.get("note"), row["saved_at"],
+         row.get("recovery_pct"), row.get("sleep_efficiency_pct"),
+         row.get("voice_transcript"),
+         json.dumps(row.get("analysis")) if row.get("analysis") is not None else None),
     )
 
 
@@ -274,3 +321,96 @@ def upsert_stress_samples(conn: psycopg.Connection, device_id: str, samples) -> 
                 (device_id, s["ts"], s.get("score"), s.get("rmssd_ms"),
                  s.get("hr_bpm"), s.get("motion_var"), s.get("quality")),
             )
+
+
+def upsert_workout_day_plan(conn: psycopg.Connection, device_id: str, row: dict) -> None:
+    """Upsert manual day plan (PK device_id, day_key)."""
+    conn.execute(
+        """INSERT INTO workout_day_plans
+           (device_id, day_key, primary_workout_id, activity_type, crossfit_style,
+            blocks_done, note, prvn_reference_day_key, is_rest_day, saved_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+           ON CONFLICT (device_id, day_key) DO UPDATE SET
+             primary_workout_id     = EXCLUDED.primary_workout_id,
+             activity_type          = EXCLUDED.activity_type,
+             crossfit_style         = EXCLUDED.crossfit_style,
+             blocks_done            = EXCLUDED.blocks_done,
+             note                   = EXCLUDED.note,
+             prvn_reference_day_key = EXCLUDED.prvn_reference_day_key,
+             is_rest_day            = EXCLUDED.is_rest_day,
+             saved_at               = EXCLUDED.saved_at""",
+        (device_id, row["day_key"], row.get("primary_workout_id"),
+         row.get("activity_type"), row.get("crossfit_style"),
+         json.dumps(row.get("blocks_done") or []), row.get("note"),
+         row.get("prvn_reference_day_key"), bool(row.get("is_rest_day")),
+         row["saved_at"]),
+    )
+
+
+def delete_workout_day_plan(conn: psycopg.Connection, device_id: str, day_key: str) -> None:
+    conn.execute(
+        "DELETE FROM workout_day_plans WHERE device_id = %s AND day_key = %s",
+        (device_id, day_key),
+    )
+
+
+def upsert_mobility_completion(conn: psycopg.Connection, device_id: str, row: dict) -> None:
+    """Upsert one guided mobility completion (PK device_id, day_key, session_kind)."""
+    conn.execute(
+        """INSERT INTO mobility_completions
+           (device_id, day_key, session_kind, exercise_count, completed_at)
+           VALUES (%s, %s, %s, %s, to_timestamp(%s))
+           ON CONFLICT (device_id, day_key, session_kind) DO UPDATE SET
+             exercise_count = EXCLUDED.exercise_count,
+             completed_at   = EXCLUDED.completed_at""",
+        (device_id, row["day_key"], row["session_kind"], row["exercise_count"],
+         row["completed_at"]),
+    )
+
+
+def upsert_coach_report(conn: psycopg.Connection, device_id: str, day_key: str, report: dict) -> None:
+    conn.execute(
+        """INSERT INTO coach_reports (device_id, day_key, report, computed_at)
+           VALUES (%s, %s, %s, now())
+           ON CONFLICT (device_id, day_key) DO UPDATE SET
+             report      = EXCLUDED.report,
+             computed_at = now()""",
+        (device_id, day_key, json.dumps(report)),
+    )
+
+
+def delete_coach_report(conn: psycopg.Connection, device_id: str, day_key: str) -> None:
+    conn.execute(
+        "DELETE FROM coach_reports WHERE device_id = %s AND day_key = %s",
+        (device_id, day_key),
+    )
+
+
+def set_coach_narrative(
+    conn: psycopg.Connection, device_id: str, day_key: str, narrative: str,
+) -> None:
+    conn.execute(
+        """UPDATE coach_reports
+           SET narrative = %s, narrative_at = now()
+           WHERE device_id = %s AND day_key = %s""",
+        (narrative, device_id, day_key),
+    )
+
+
+def get_coach_explain_usage(conn: psycopg.Connection, device_id: str, usage_day) -> str | None:
+    row = conn.execute(
+        "SELECT day_key FROM coach_explain_usage WHERE device_id = %s AND usage_day = %s",
+        (device_id, usage_day),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def record_coach_explain_usage(
+    conn: psycopg.Connection, device_id: str, usage_day, day_key: str,
+) -> None:
+    conn.execute(
+        """INSERT INTO coach_explain_usage (device_id, usage_day, day_key)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (device_id, usage_day) DO NOTHING""",
+        (device_id, usage_day, day_key),
+    )

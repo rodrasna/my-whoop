@@ -15,6 +15,10 @@ public final class LiveState: ObservableObject {
     @Published public var batteryMv: Int? = nil
     @Published public var lastFrameType: String? = nil
     @Published public var lastEvent: String? = nil
+    /// Unix epoch the strap reports as armed (nil = unknown / disarmed). Set after GET_ALARM_TIME verify.
+    @Published public var firmwareAlarmEpoch: UInt32? = nil
+    /// True when GET_ALARM_TIME (or STRAP_DRIVEN_ALARM_SET) confirms the target time is on the strap.
+    @Published public var firmwareAlarmVerified = false
     /// Rolling log of human-readable lines for the on-device verification checklist.
     @Published public var log: [String] = []
 

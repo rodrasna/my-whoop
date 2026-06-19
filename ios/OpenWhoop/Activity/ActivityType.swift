@@ -36,10 +36,10 @@ enum ActivityType: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// SF Symbol para CrossFit (figure.gymnastics desde iOS 16; handstand no existe en el catálogo del sistema).
+    /// SF Symbol para CrossFit — halterofilia / barra (peso muerto).
     var symbol: String {
         switch self {
-        case .crossfit:  return "figure.gymnastics"
+        case .crossfit:  return "figure.strengthtraining.traditional"
         case .running:   return "figure.run"
         case .cycling:   return "bicycle"
         case .strength:  return "dumbbell.fill"

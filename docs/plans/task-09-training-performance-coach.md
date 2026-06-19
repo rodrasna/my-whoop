@@ -1,6 +1,6 @@
 # Task 09 — Coach de rendimiento en entreno
 
-> **Estado:** Pendiente (después de Task 08) · **Última actualización:** 2026-06-16  
+> **Estado:** Fases A–B hechas (2026-06-18) · Fase C ML opcional pendiente  
 > **Objetivo:** Evaluar cómo fue un entreno (global y por bloques PRVN) comparando rendimiento fisiológico con tu histórico y, opcionalmente, generar narrativa con LLM en el servidor.
 
 ---
@@ -211,15 +211,15 @@ GET  /v1/coach/day?device=my-whoop&day=2026-06-16   # cached
 
 ### Fase A — Reglas + API (sin LLM)
 
-- [ ] Tabla `workout_day_plans` + PUT desde iOS
-- [ ] `training_coach.py` + tests con fixtures
-- [ ] GET report en Actividad
-- [ ] Copy en español desde plantillas (`insight_id` → frase)
+- [x] Tabla `workout_day_plans` + PUT desde iOS
+- [x] `training_coach.py` + tests con fixtures
+- [x] GET report en Actividad
+- [x] Copy en español desde plantillas (`insight_id` → frase)
 
 ### Fase B — LLM narrativo
 
-- [ ] Endpoint explain + Settings toggle
-- [ ] Rate limit (1/día gratis)
+- [x] Endpoint explain + Settings toggle
+- [x] Rate limit (1/día por dispositivo UTC)
 
 ### Fase C — ML (opcional)
 

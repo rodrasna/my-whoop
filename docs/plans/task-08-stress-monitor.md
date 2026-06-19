@@ -299,7 +299,7 @@ Reemplazar `chartContent` placeholder por `Swift Charts` (igual que otras vistas
 - [x] SQL `stress_samples` + store/read
 - [x] `GET /v1/stress`
 - [x] Hook en `compute_day`
-- [ ] Verificar con datos reales + `curl`
+- [x] Verificar con datos reales + `curl` (2026-06-16: 177/288 ventanas scored, avg 1.47)
 
 ### Fase B — iOS UI
 

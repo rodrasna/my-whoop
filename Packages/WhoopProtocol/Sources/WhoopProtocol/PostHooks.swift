@@ -206,6 +206,17 @@ func registerPostHooks() {
                 fb.parsed["history_newest"] = .string(
                     utcRangeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(hi))))
             }
+        case "GET_ALARM_TIME", "SET_ALARM_TIME" where pay.count >= 2:
+            fb.parsed["alarm_ok"] = .bool(pay[0] == 0x0a && pay[1] == 0x01)
+            if pay.count >= 9, pay[2] == 0x01 {
+                let e = UInt32(pay[3]) | (UInt32(pay[4]) << 8)
+                    | (UInt32(pay[5]) << 16) | (UInt32(pay[6]) << 24)
+                fb.parsed["alarm_epoch"] = .int(Int(e))
+            } else if pay.count >= 6 {
+                let e = UInt32(pay[2]) | (UInt32(pay[3]) << 8)
+                    | (UInt32(pay[4]) << 16) | (UInt32(pay[5]) << 24)
+                fb.parsed["alarm_epoch"] = .int(Int(e))
+            }
         default:
             break
         }

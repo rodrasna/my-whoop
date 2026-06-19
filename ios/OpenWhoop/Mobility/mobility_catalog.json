@@ -1,0 +1,672 @@
+{
+  "exercises": [
+    {
+      "id": "hip-90-90",
+      "name": "90/90 de cadera",
+      "description": "Siéntate con ambas rodillas a 90°. Inclínate al pecho sobre la pierna delantera y rota el tronco hacia la pierna trasera. Cambia de lado.",
+      "focus_areas": [
+        "hips",
+        "glutes"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "hipRotation",
+      "youtube_url": "https://www.youtube.com/watch?v=t4Zz6-aG8Iw",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "squat",
+        "hinge"
+      ],
+      "mobility_mode": "dynamic",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "couch-stretch",
+      "name": "Couch stretch",
+      "description": "Rodilla apoyada en el suelo contra un muro o banco, pie trasero en vertical. Empuja la cadera hacia adelante manteniendo el tronco erguido.",
+      "focus_areas": [
+        "quads",
+        "hips"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "lunge",
+      "youtube_url": "https://www.youtube.com/watch?v=-ZX1QMTdAC4",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "squat",
+        "hinge",
+        "locomotion"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "ankle-rocks",
+      "name": "Rock de tobillo",
+      "description": "En posición de estocada, lleva la rodilla delantera sobre el tobillo sin levantar el talón. Oscila suavemente adelante y atrás.",
+      "focus_areas": [
+        "ankles"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "ankleRock",
+      "youtube_url": "https://www.youtube.com/watch?v=jqyUfTzTHiw",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "squat",
+        "locomotion",
+        "overhead"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "band-pull-aparts",
+      "name": "Pull-aparts con banda",
+      "description": "Banda a la altura del pecho, brazos extendidos. Separa la banda llevando los codos hacia atrás. Aprieta omóplatos al final.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "shoulderCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=SLFDrgKarUs",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "overhead",
+        "pull",
+        "push"
+      ],
+      "mobility_mode": "activation"
+    },
+    {
+      "id": "thread-needle",
+      "name": "Thread the needle",
+      "description": "A cuatro patas, desliza un brazo bajo el cuerpo y apoya el hombro y la sien en el suelo. Rota la torácica.",
+      "focus_areas": [
+        "thoracic",
+        "shoulders"
+      ],
+      "session_kinds": [
+        "daily",
+        "preSleep"
+      ],
+      "pose": "thoracicRotation",
+      "youtube_url": "https://www.youtube.com/watch?v=MfUx9FCOb1E",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "pull",
+        "overhead"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "cat-cow",
+      "name": "Gato-vaca",
+      "description": "A cuatro patas alterna flexión y extensión de la columna. Inhala arqueando, exhala redondeando la espalda.",
+      "focus_areas": [
+        "thoracic",
+        "hips"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "catCow",
+      "youtube_url": "https://www.youtube.com/watch?v=kqnua4rHVVA",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "squat",
+        "overhead",
+        "hinge"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "child-pose",
+      "name": "Postura del niño",
+      "description": "Rodillas separadas, glúteos hacia los talones, brazos extendidos al frente. Respira profundo y relaja hombros.",
+      "focus_areas": [
+        "thoracic",
+        "hips",
+        "shoulders"
+      ],
+      "session_kinds": [
+        "preSleep"
+      ],
+      "pose": "childPose",
+      "youtube_url": "https://www.youtube.com/watch?v=QxOA95rirfk",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "squat"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "wrist-circles",
+      "name": "Círculos de muñeca",
+      "description": "Palmas juntas o apoyadas en el suelo. Rota muñecas en círculos amplios en ambas direcciones.",
+      "focus_areas": [
+        "wrists",
+        "shoulders"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "wristCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=KaGNy2GMecg",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "grip",
+        "overhead",
+        "push",
+        "pull"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "hip-flexor-lunge",
+      "name": "Estocada flexor de cadera",
+      "description": "Estocada amplia, pelvis en retroversión (glúteo apretado). Eleva el brazo del mismo lado que la pierna trasera.",
+      "focus_areas": [
+        "hips",
+        "quads"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "lunge",
+      "youtube_url": "https://www.youtube.com/watch?v=tsGPYSQbZx4",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "squat",
+        "locomotion"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "thoracic-rotation-quad",
+      "name": "Rotación torácica a cuatro patas",
+      "description": "Mano detrás de la cabeza, abre el codo hacia el techo rotando solo la torácica. La cadera no se mueve.",
+      "focus_areas": [
+        "thoracic",
+        "shoulders"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "thoracicRotation",
+      "youtube_url": "https://www.youtube.com/watch?v=z2zv526I7M8",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "overhead",
+        "pull",
+        "push"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "standing-hamstring",
+      "name": "Isquio de pie",
+      "description": "Talón apoyado en un banco bajo, espalda recta. Inclínate desde la cadera hasta sentir estiramiento en la parte posterior del muslo.",
+      "focus_areas": [
+        "hamstrings",
+        "glutes"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "hamstringStretch",
+      "youtube_url": "https://www.youtube.com/watch?v=FDwpEdxZ4H4",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "hinge",
+        "locomotion"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "air-squat-hold",
+      "name": "Sentadilla profunda con pausa",
+      "description": "Sentadilla con talones en el suelo, codos empujando rodillas hacia fuera. Mantén la posición y oscila suavemente.",
+      "focus_areas": [
+        "hips",
+        "ankles",
+        "glutes"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "squat",
+      "youtube_url": "https://www.youtube.com/watch?v=2C-uNgKwPLE",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "squat",
+        "overhead"
+      ],
+      "mobility_mode": "dynamic",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "standing-fold",
+      "name": "Flexión de pie relajada",
+      "description": "De pie, deja caer el tronco y la cabeza. Balancea suavemente o agarra los codos. Ideal antes de dormir.",
+      "focus_areas": [
+        "hamstrings",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "preSleep"
+      ],
+      "pose": "standingFold",
+      "youtube_url": "https://www.youtube.com/watch?v=g7Uhp5tphAs",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "hinge"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "shoulder-dislocates",
+      "name": "Dislocaciones con banda/palo",
+      "description": "Agarre amplio en banda o palo. Pasa el objeto por encima de la cabeza y detrás de la espalda con brazos rectos.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic",
+        "wrists"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "shoulderCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=mwORmcOEjhE",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "overhead",
+        "pull",
+        "push"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "pigeon-pose",
+      "name": "Postura de la paloma",
+      "description": "Pierna delantera doblada, tibia paralela al borde de la esterilla. Inclínate al frente si es cómodo. Cambia de lado.",
+      "focus_areas": [
+        "hips",
+        "glutes"
+      ],
+      "session_kinds": [
+        "preSleep",
+        "daily"
+      ],
+      "pose": "hipRotation",
+      "youtube_url": "https://www.youtube.com/watch?v=0_zPqA65Nok",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "squat",
+        "locomotion"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "doorway-pec-stretch",
+      "name": "Estiramiento de pectoral en marco",
+      "description": "Antebrazo apoyado en el marco de una puerta, codo a 90°. Gira el cuerpo lentamente hasta sentir estiramiento en pecho y hombro anterior.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "shoulderCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=3VcKaXpzqRo",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "push",
+        "overhead"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "wall-slide",
+      "name": "Deslizamiento en pared",
+      "description": "Espalda y cabeza contra la pared. Desliza los codos hacia arriba manteniendo contacto con la pared. Baja controlando.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "shoulderCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=rw35lIr2LjA",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "push",
+        "overhead",
+        "pull"
+      ],
+      "mobility_mode": "activation"
+    },
+    {
+      "id": "lat-wall-stretch",
+      "name": "Estiramiento de dorsal en pared",
+      "description": "Manos en la pared a la altura de la cadera. Aleja los pies y empuja el pecho hacia el suelo. Siente el estiramiento en dorsales y hombros.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "childPose",
+      "youtube_url": "https://www.youtube.com/watch?v=x1SdnOkQoo0",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "pull",
+        "overhead"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "forearm-flexor-stretch",
+      "name": "Estiramiento flexores de antebrazo",
+      "description": "Brazo extendido, palma hacia arriba. Con la otra mano tira suavemente de los dedos hacia abajo. Cambia de lado.",
+      "focus_areas": [
+        "wrists"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "wristCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=oQpskjE937M",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "grip",
+        "pull",
+        "push"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 45
+    },
+    {
+      "id": "forearm-extensor-stretch",
+      "name": "Estiramiento extensores de antebrazo",
+      "description": "Brazo extendido, dorso de la mano hacia abajo. Presiona suavemente los nudillos hacia el cuerpo. Ideal tras dominadas o barra.",
+      "focus_areas": [
+        "wrists"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "wristCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=y_f45pn4veU",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "grip",
+        "pull"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 45
+    },
+    {
+      "id": "calf-wall-stretch",
+      "name": "Gemelo en pared",
+      "description": "Manos en la pared, una pierna atrás con talón en el suelo. Empuja la rodilla trasera hacia atrás. Cambia de pierna.",
+      "focus_areas": [
+        "ankles"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "lunge",
+      "youtube_url": "https://www.youtube.com/watch?v=2_2GMXTc1BE",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "locomotion",
+        "squat"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "cossack-squat",
+      "name": "Sentadilla cosaca",
+      "description": "Pies anchos. Desplázate lateralmente hacia un lado manteniendo el talón en el suelo. Alterna lados con control.",
+      "focus_areas": [
+        "hips",
+        "ankles",
+        "hamstrings"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "squat",
+      "youtube_url": "https://www.youtube.com/watch?v=tpczTeSkHz0",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "squat",
+        "locomotion"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "hip-circles",
+      "name": "Círculos de cadera",
+      "description": "De pie, manos en caderas. Dibuja círculos amplios con la pelvis en ambas direcciones. Mantén el tronco estable.",
+      "focus_areas": [
+        "hips",
+        "glutes"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "hipRotation",
+      "youtube_url": "https://www.youtube.com/watch?v=yFi1FDOFXq0",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "locomotion",
+        "hinge",
+        "squat"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "standing-quad-stretch",
+      "name": "Cuádriceps de pie",
+      "description": "De pie, lleva el talón al glúteo. Rodillas juntas, pelvis neutra. Puedes apoyarte en la pared. Cambia de pierna.",
+      "focus_areas": [
+        "quads",
+        "hips"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "lunge",
+      "youtube_url": "https://www.youtube.com/watch?v=Uwwuc8pRRc0",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "locomotion"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 60
+    },
+    {
+      "id": "overhead-band-opener",
+      "name": "Apertura overhead con banda",
+      "description": "Banda tensa por encima de la cabeza, brazos extendidos. Separa la banda llevando los brazos atrás sin arquear lumbar.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic",
+        "wrists"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "shoulderCircle",
+      "youtube_url": "https://www.youtube.com/watch?v=mwORmcOEjhE",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "overhead",
+        "push",
+        "pull"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "prone-press-up",
+      "name": "Press-up en prono (cobra suave)",
+      "description": "Boca abajo, manos bajo hombros. Extiende los brazos elevando el pecho sin dolor lumbar. Ideal para torácica y flexores de cadera.",
+      "focus_areas": [
+        "thoracic",
+        "hips"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout",
+        "preSleep"
+      ],
+      "pose": "catCow",
+      "youtube_url": "https://www.youtube.com/watch?v=JDcdhTuycOI",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "push"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "jefferson-curl-prep",
+      "name": "Flexión Jefferson (peso corporal)",
+      "description": "De pie, barbilla al pecho. Desciende vértebra a vértebra flexionando la columna. Sube lentamente. Solo rango cómodo.",
+      "focus_areas": [
+        "hamstrings",
+        "glutes",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "standingFold",
+      "youtube_url": "https://www.youtube.com/watch?v=4BOTvaRaDjI",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "hinge"
+      ],
+      "mobility_mode": "dynamic"
+    },
+    {
+      "id": "scapular-push-up",
+      "name": "Flexión escapular",
+      "description": "Posición de plancha alta. Sin doblar codos, separa y junta los omóplatos. Activa serrato antes de empujes o dominadas.",
+      "focus_areas": [
+        "shoulders",
+        "thoracic"
+      ],
+      "session_kinds": [
+        "daily",
+        "preWorkout"
+      ],
+      "pose": "catCow",
+      "youtube_url": "https://www.youtube.com/watch?v=LIH9jvRswoQ",
+      "duration_sec": 60,
+      "intensity": "moderate",
+      "movement_patterns": [
+        "push",
+        "pull"
+      ],
+      "mobility_mode": "activation"
+    },
+    {
+      "id": "frog-stretch",
+      "name": "Estiramiento rana (frog)",
+      "description": "A cuatro patas, rodillas muy abiertas. Empuja las caderas hacia atrás entre los talones. Respira y relaja.",
+      "focus_areas": [
+        "hips",
+        "glutes"
+      ],
+      "session_kinds": [
+        "daily",
+        "preSleep"
+      ],
+      "pose": "squat",
+      "youtube_url": "https://www.youtube.com/watch?v=9dO_JXxFWCM",
+      "duration_sec": 60,
+      "intensity": "gentle",
+      "movement_patterns": [
+        "squat",
+        "hinge"
+      ],
+      "mobility_mode": "staticHold",
+      "max_hold_sec": 90
+    }
+  ]
+}

@@ -2,43 +2,43 @@ import SwiftUI
 import UIKit
 
 struct RootTabView: View {
-    @State private var selection: Int = {
-        // Screenshot helper: -startTab <0..3> picks the initial tab (simulator captures only).
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "-startTab"), i + 1 < args.count,
-           let n = Int(args[i + 1]) { return n }
-        return 0
-    }()
+    @EnvironmentObject private var tabRouter: RootTabRouter
 
     init() {
         Self.configureTabBarAppearance()
     }
 
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: $tabRouter.selectedTab) {
             TodayView()
                 .tabItem {
                     Label("Hoy", systemImage: "house.fill")
                 }
-                .tag(0)
+                .tag(RootTabRouter.Tab.today.rawValue)
 
             SleepView()
                 .tabItem {
                     Label("Sueño", systemImage: "moon.stars.fill")
                 }
-                .tag(1)
+                .tag(RootTabRouter.Tab.sleep.rawValue)
 
             HealthView()
                 .tabItem {
                     Label("Salud", systemImage: "heart.text.square.fill")
                 }
-                .tag(2)
+                .tag(RootTabRouter.Tab.health.rawValue)
 
             WorkoutsView()
                 .tabItem {
                     Label("Actividad", systemImage: "bolt.fill")
                 }
-                .tag(3)
+                .tag(RootTabRouter.Tab.activity.rawValue)
+
+            MobilityView()
+                .tabItem {
+                    Label("Movilidad", systemImage: "figure.flexibility")
+                }
+                .tag(RootTabRouter.Tab.mobility.rawValue)
         }
         .tint(WH.Color.strainBlue)
     }

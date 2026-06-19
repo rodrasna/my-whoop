@@ -88,11 +88,11 @@ HR_DOG_SIGMA2_S: float = 600.0
 
 # --- Staging classifier percentile bands (per-night-relative, §4 Stage 2) ----
 #: HR percentile (over the sleep-period epochs) at/below which HR is "low".
-STAGE_HR_LOW_PCT: float = 25.0
+STAGE_HR_LOW_PCT: float = 32.0
 #: HR percentile at/above which HR is "elevated".
 STAGE_HR_HIGH_PCT: float = 70.0
 #: HF / RMSSD percentile at/above which parasympathetic tone is "high" (deep).
-STAGE_HRV_HIGH_PCT: float = 70.0
+STAGE_HRV_HIGH_PCT: float = 58.0
 #: HR-variability (Walch DoG std) percentile at/above which cardiac is "activated"
 #: (REM / wake signature).
 STAGE_HRV_VAR_HIGH_PCT: float = 65.0
@@ -107,21 +107,28 @@ STAGE_RRV_LOW_PCT: float = 50.0
 #: per-sample gravity deltas exceed the still threshold. Reuses the same
 #: still-threshold semantics as the sleep/wake spine. Tuned against real overnight
 #: data: ~0.15 surfaces genuine disturbances without flagging every still stir.
-STAGE_WAKE_MOVE_FRAC: float = 0.15
+STAGE_WAKE_MOVE_FRAC: float = 0.18
 #: At/below this moving-sample fraction the body is treated as essentially still
 #: (a prerequisite for deep/REM, both low-movement stages).
 STAGE_STILL_MOVE_FRAC: float = 0.10
 
 # --- Post-processing (§4 Stage 3) -------------------------------------------
-#: Median-smoothing window in epochs (must be odd). 5 epochs = 2.5 min — kills
+#: Median-smoothing window in epochs (must be odd). 7 epochs = 3.5 min — kills
 #: isolated 30 s flips while preserving real stage blocks.
-SMOOTH_EPOCHS: int = 5
+SMOOTH_EPOCHS: int = 7
 #: No REM allowed in the first N minutes after sleep onset (physiology: REM
-#: latency is typically 70–120 min; we use a conservative 15-min floor).
-NO_REM_AFTER_ONSET_MIN: float = 15.0
+#: latency is typically 70–120 min; 60 min is a conservative wrist-strap floor).
+NO_REM_AFTER_ONSET_MIN: float = 60.0
 #: Deep sleep is concentrated in the first third of the night; deep detected in
 #: the last third is downgraded to light (physiology re-imposition, §4 Stage 3).
 DEEP_FIRST_FRACTION: float = 1.0 / 3.0
+
+#: Wake runs shorter than this (epochs × 30 s) are micro-arousals → relabeled light.
+MIN_WAKE_EPOCHS: int = 6  # 3 min
+#: REM bouts shorter than this are relabeled light (reduces hypnogram flicker).
+MIN_REM_EPOCHS: int = 8  # 4 min
+#: Distinct post-onset awakenings counted only when wake lasts at least this long.
+MIN_DISTURBANCE_S: float = 180.0  # 3 min (AASM arousal-like threshold)
 
 
 # ===========================================================================
@@ -720,6 +727,61 @@ def smooth_labels(labels: Sequence[str], window: int = SMOOTH_EPOCHS) -> list[st
         # tie where the incumbent is not in the top-2, winners[0] (first by
         # majority-count insertion order) is used deterministically.
         out.append(labels[i] if labels[i] in winners else winners[0])
+    return out
+
+
+def collapse_short_wake_runs(
+    labels: Sequence[str],
+    min_epochs: int = MIN_WAKE_EPOCHS,
+) -> list[str]:
+    """Relabel brief wake runs (< ``min_epochs``) as light.
+
+  Micro-movements and strap noise often produce 30–90 s "wake" epochs that are
+  not conscious awakenings. Collapsing them reduces false disturbances and WASO.
+    """
+    if min_epochs <= 1:
+        return list(labels)
+    out = list(labels)
+    n = len(out)
+    i = 0
+    while i < n:
+        if out[i] != "wake":
+            i += 1
+            continue
+        j = i
+        while j < n and out[j] == "wake":
+            j += 1
+        if (j - i) < min_epochs:
+            for k in range(i, j):
+                out[k] = "light"
+        i = j
+    return out
+
+
+def merge_short_bouts(
+    labels: Sequence[str],
+    stage: str,
+    min_epochs: int,
+    *,
+    replacement: str = "light",
+) -> list[str]:
+    """Relabel short runs of ``stage`` (fewer than ``min_epochs``) to ``replacement``."""
+    if min_epochs <= 1:
+        return list(labels)
+    out = list(labels)
+    n = len(out)
+    i = 0
+    while i < n:
+        if out[i] != stage:
+            i += 1
+            continue
+        j = i
+        while j < n and out[j] == stage:
+            j += 1
+        if (j - i) < min_epochs:
+            for k in range(i, j):
+                out[k] = replacement
+        i = j
     return out
 
 

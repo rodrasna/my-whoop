@@ -207,4 +207,28 @@ final class AlarmCommandsTests: XCTestCase {
         XCTAssertEqual(WhoopCommand.runAlarm.rawValue,      68)
         XCTAssertEqual(WhoopCommand.disableAlarm.rawValue,  69)
     }
+
+    // MARK: - Alarm response parsing
+
+    func testAlarmResponseParserOkStatus() {
+        XCTAssertTrue(AlarmResponseParser.isOk([0x0a, 0x01]))
+        XCTAssertFalse(AlarmResponseParser.isOk([0x0a, 0x03]))
+    }
+
+    func testAlarmResponseParserEpochFormPrefixed() {
+        let epoch: UInt32 = 1_750_000_000
+        let payload: [UInt8] = [0x0a, 0x01, 0x01,
+                                UInt8(epoch & 0xFF), UInt8((epoch >> 8) & 0xFF),
+                                UInt8((epoch >> 16) & 0xFF), UInt8((epoch >> 24) & 0xFF),
+                                0x00, 0x00]
+        XCTAssertEqual(AlarmResponseParser.epoch(from: payload), epoch)
+    }
+
+    func testAlarmResponseParserEpochCompact() {
+        let epoch: UInt32 = 1_750_000_000
+        let payload: [UInt8] = [0x0a, 0x01,
+                                UInt8(epoch & 0xFF), UInt8((epoch >> 8) & 0xFF),
+                                UInt8((epoch >> 16) & 0xFF), UInt8((epoch >> 24) & 0xFF)]
+        XCTAssertEqual(AlarmResponseParser.epoch(from: payload), epoch)
+    }
 }

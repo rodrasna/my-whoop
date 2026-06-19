@@ -383,6 +383,16 @@ def _confirm_sleep_with_hr(period: dict, hr: Sequence[dict], baseline: float | N
 # detect_sleep  (public)
 # ===========================================================================
 
+def is_nap_like(session: SleepSession) -> bool:
+    """Short daytime stillness (sofa/TV/rest) — label as nap, not primary night."""
+    duration_h = (session.end - session.start) / 3600.0
+    if duration_h >= 4.0:
+        return False
+    end = _dt.datetime.fromtimestamp(session.end, _dt.timezone.utc)
+    start = _dt.datetime.fromtimestamp(session.start, _dt.timezone.utc)
+    return 13 <= end.hour <= 22 and 11 <= start.hour <= 21
+
+
 def detect_sleep(streams: dict[str, list[dict]]) -> list[SleepSession]:
     """Detect sleep sessions from 1 Hz biometric streams.
 
@@ -525,6 +535,9 @@ def _stage_session(
     labels = _sf.classify_epochs(feats)
     labels = _sf.smooth_labels(labels)
     labels = _sf.reimpose_physiology(labels, feats, onset_idx, final_wake_idx)
+    labels = _sf.collapse_short_wake_runs(labels)
+    labels = _sf.merge_short_bouts(labels, "rem", _sf.MIN_REM_EPOCHS)
+    labels = _sf.smooth_labels(labels)
 
     # Pre-onset and post-final-wake epochs are not sleep: force to wake unless the
     # classifier already calls them wake. (Latency + after final awakening.)
@@ -591,8 +604,10 @@ def hypnogram_metrics(session: SleepSession) -> dict[str, float | int]:
     rem_latency = (rem_segs[0].start - onset) if rem_segs else nan
 
     # WASO + disturbances: wake runs strictly after onset and before final wake.
+    # Only count disturbances for sustained awakenings (≥ MIN_DISTURBANCE_S).
     waso = 0.0
     disturbances = 0
+    min_dist_s = _sf.MIN_DISTURBANCE_S
     for s in segs:
         if s.stage != "wake":
             continue
@@ -600,8 +615,10 @@ def hypnogram_metrics(session: SleepSession) -> dict[str, float | int]:
         w0 = max(s.start, onset)
         w1 = min(s.end, spt_end)
         if w1 > w0:
-            waso += (w1 - w0)
-            disturbances += 1
+            dur = w1 - w0
+            waso += dur
+            if dur >= min_dist_s:
+                disturbances += 1
 
     se = (tst / tib) if tib > 0 else 0.0
     pct = lambda x: (x / tst * 100.0) if tst > 0 else 0.0
@@ -627,11 +644,61 @@ def hypnogram_metrics(session: SleepSession) -> dict[str, float | int]:
 # Daily sleep summary  (UNCHANGED output keys)
 # ===========================================================================
 
-def daily_sleep_summary(sessions: Sequence[SleepSession], date: _dt.date) -> dict[str, Any]:
-    """Aggregate the sessions whose END falls on ``date`` (UTC) into a daily metric.
+# Sessions clipped by the read window [day-1 18:00, day+1 00:00) UTC often end
+# exactly at int(win_end)-1 with a short stillness run — not a real night.
+WINDOW_EDGE_MARGIN_S: float = 90.0
 
-    Matching rule: a session belongs to ``date`` if the UTC date of its ``end``
-    timestamp equals ``date`` (a night ending the morning of ``date``).
+
+def sessions_labeled_for_day(
+    sessions: Sequence[SleepSession],
+    date: _dt.date,
+    *,
+    window_end: float | None = None,
+) -> list[tuple[SleepSession, str]]:
+    """All sessions whose wake-day is ``date``, each tagged ``main`` or ``nap``.
+
+    The longest bout ending on ``date`` is ``main`` unless it is the only session
+    and nap-like (short afternoon rest). Additional bouts on the same wake-day
+    are ``nap``. Daily metrics / recovery use ``main`` only.
+    """
+    matched = [s for s in sessions if _end_date_utc(s) == date]
+    if window_end is not None:
+        cutoff = window_end - WINDOW_EDGE_MARGIN_S
+        matched = [s for s in matched if s.end < cutoff]
+    if not matched:
+        return []
+    primary = max(matched, key=lambda s: s.end - s.start)
+    labeled: list[tuple[SleepSession, str]] = []
+    for s in matched:
+        if s is primary:
+            kind = "nap" if is_nap_like(s) and len(matched) == 1 else "main"
+        else:
+            kind = "nap"
+        labeled.append((s, kind))
+    return labeled
+
+
+def sessions_for_day(
+    sessions: Sequence[SleepSession],
+    date: _dt.date,
+    *,
+    window_end: float | None = None,
+) -> list[SleepSession]:
+    """Primary night attributed to ``date`` for daily metrics and recovery."""
+    return [s for s, k in sessions_labeled_for_day(sessions, date, window_end=window_end)
+            if k == "main"]
+
+
+def daily_sleep_summary(
+    sessions: Sequence[SleepSession],
+    date: _dt.date,
+    *,
+    window_end: float | None = None,
+) -> dict[str, Any]:
+    """Aggregate the primary night ending on ``date`` (UTC) into a daily metric.
+
+    Matching rule: the longest session whose UTC end-date equals ``date``, after
+    dropping read-window edge artifacts (see ``sessions_for_day``).
 
     Returns (keys UNCHANGED — daily.py + dashboard depend on these):
         {
@@ -650,7 +717,7 @@ def daily_sleep_summary(sessions: Sequence[SleepSession], date: _dt.date) -> dic
 
     With no matching session, returns zeros / None (documented sentinel).
     """
-    matched = [s for s in sessions if _end_date_utc(s) == date]
+    matched = sessions_for_day(sessions, date, window_end=window_end)
 
     if not matched:
         return {

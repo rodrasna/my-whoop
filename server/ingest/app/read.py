@@ -1,6 +1,7 @@
 """Read-side queries + archive-frame reader for the Whoop datastore. DB + filesystem,
 no HTTP. Timestamps are returned as ISO-8601 strings (psycopg gives tz-aware datetimes;
 FastAPI serialises them)."""
+import json
 import math
 
 import zstandard
@@ -320,7 +321,7 @@ def query_sleep(conn, device_id, day):
     """Sleep sessions for a device whose END falls on ``day`` (the night ending
     that morning). ``day`` is a datetime.date (or YYYY-MM-DD string). Stages are
     returned parsed (JSONB → list). Timestamps are tz-aware datetimes (ISO on the wire)."""
-    cols = ["device_id", "start_ts", "end_ts", "efficiency", "resting_hr", "avg_hrv", "stages"]
+    cols = ["device_id", "start_ts", "end_ts", "efficiency", "resting_hr", "avg_hrv", "stages", "kind"]
     rows = conn.execute(
         f"SELECT {', '.join(cols)} FROM sleep_sessions "
         "WHERE device_id = %s AND (end_ts AT TIME ZONE 'UTC')::date = %s ORDER BY start_ts",
@@ -329,11 +330,151 @@ def query_sleep(conn, device_id, day):
     return [dict(zip(cols, r)) for r in rows]
 
 
+_CHECK_IN_COLS = [
+    "device_id", "day_key", "morning_feeling", "onset", "factors", "note",
+    "saved_at", "recovery_pct", "sleep_efficiency_pct", "voice_transcript", "analysis",
+]
+
+
+def query_sleep_check_ins(conn, device_id, start_date, end_date):
+    """Subjective check-ins over inclusive [start_date, end_date] day_key range."""
+    rows = conn.execute(
+        f"SELECT {', '.join(_CHECK_IN_COLS)} FROM sleep_check_ins "
+        "WHERE device_id = %s AND day_key >= %s AND day_key <= %s ORDER BY day_key",
+        (device_id, str(start_date), str(end_date)),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(_CHECK_IN_COLS, r))
+        if isinstance(d.get("factors"), str):
+            d["factors"] = json.loads(d["factors"])
+        if isinstance(d.get("analysis"), str):
+            d["analysis"] = json.loads(d["analysis"])
+        out.append(d)
+    return out
+
+
+_DAY_PLAN_COLS = [
+    "device_id", "day_key", "primary_workout_id", "activity_type", "crossfit_style",
+    "blocks_done", "note", "prvn_reference_day_key", "is_rest_day", "saved_at",
+]
+
+_MOBILITY_COMPLETION_COLS = [
+    "device_id", "day_key", "session_kind", "exercise_count", "completed_at",
+]
+
+_VALID_MOBILITY_SESSION_KINDS = frozenset({
+    "daily", "preWorkout", "postWorkout", "preSleep",
+})
+
+_VALID_PROGRAM_BLOCK_KINDS = frozenset({
+    "warmup", "strength", "metcon", "accessory", "other",
+})
+
+
+def query_workout_day_plans(conn, device_id, start_date, end_date):
+    """Day plans over inclusive [start_date, end_date] day_key range."""
+    rows = conn.execute(
+        f"SELECT {', '.join(_DAY_PLAN_COLS)} FROM workout_day_plans "
+        "WHERE device_id = %s AND day_key >= %s AND day_key <= %s ORDER BY day_key",
+        (device_id, str(start_date), str(end_date)),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(_DAY_PLAN_COLS, r))
+        if isinstance(d.get("blocks_done"), str):
+            d["blocks_done"] = json.loads(d["blocks_done"])
+        out.append(d)
+    return out
+
+
+def query_mobility_completions(conn, device_id, start_date, end_date):
+    """Mobility completions over inclusive [start_date, end_date] day_key range."""
+    rows = conn.execute(
+        f"SELECT {', '.join(_MOBILITY_COMPLETION_COLS)} FROM mobility_completions "
+        "WHERE device_id = %s AND day_key >= %s AND day_key <= %s "
+        "ORDER BY day_key, session_kind",
+        (device_id, str(start_date), str(end_date)),
+    ).fetchall()
+    return [dict(zip(_MOBILITY_COMPLETION_COLS, r)) for r in rows]
+
+
+def query_coach_report(conn, device_id: str, day_key: str) -> dict | None:
+    row = conn.execute(
+        """SELECT report, narrative, narrative_at, computed_at FROM coach_reports
+           WHERE device_id = %s AND day_key = %s""",
+        (device_id, day_key),
+    ).fetchone()
+    if not row:
+        return None
+    report, narrative, narrative_at, computed_at = row
+    if isinstance(report, str):
+        report = json.loads(report)
+    return {
+        "report": report,
+        "narrative": narrative,
+        "narrative_at": narrative_at,
+        "computed_at": computed_at,
+    }
+
+
 _WORKOUT_COLS = [
     "device_id", "start_ts", "end_ts", "avg_hr", "peak_hr", "strain", "kind",
     "duration_s", "zone_time_pct", "avg_hrr_pct", "hrmax", "hrmax_source",
     "calories_kcal", "calories_kj", "motion_var", "hr_peaks_per_min",
 ]
+
+
+def count_exercise_sessions_for_day(conn, device_id, day) -> int:
+    """Exercise sessions whose start_ts (UTC date) equals ``day``."""
+    row = conn.execute(
+        """SELECT COUNT(*) FROM exercise_sessions
+           WHERE device_id = %s
+           AND start_ts >= %s::date AT TIME ZONE 'UTC'
+           AND start_ts <  (%s::date + INTERVAL '1 day') AT TIME ZONE 'UTC'""",
+        (device_id, day, day),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _timestamp_to_epoch(ts) -> float:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if hasattr(ts, "timestamp"):
+        return ts.timestamp()
+    raise TypeError(f"unexpected timestamp type: {type(ts)!r}")
+
+
+def exercise_session_row_to_dict(row: dict) -> dict:
+    """Shape a ``query_workouts`` row like ``daily._exercise_to_dict`` output."""
+    zt = row.get("zone_time_pct")
+    if zt is not None:
+        zt = {str(k): v for k, v in zt.items()}
+    return {
+        "start": _timestamp_to_epoch(row["start_ts"]),
+        "end": _timestamp_to_epoch(row["end_ts"]),
+        "avg_hr": row.get("avg_hr"),
+        "peak_hr": row.get("peak_hr"),
+        "strain": row.get("strain"),
+        "kind": row.get("kind"),
+        "duration_s": row.get("duration_s"),
+        "zone_time_pct": zt,
+        "avg_hrr_pct": row.get("avg_hrr_pct"),
+        "hrmax": row.get("hrmax"),
+        "hrmax_source": row.get("hrmax_source"),
+        "calories_kcal": row.get("calories_kcal"),
+        "calories_kj": row.get("calories_kj"),
+        "motion_var": row.get("motion_var"),
+        "hr_peaks_per_min": row.get("hr_peaks_per_min"),
+    }
+
+
+def query_exercises_for_day(conn, device_id, day) -> list:
+    """Persisted exercise sessions for ``day``, in ``compute_day`` response shape."""
+    return [
+        exercise_session_row_to_dict(r)
+        for r in query_workouts(conn, device_id, day, day)
+    ]
 
 
 def query_workouts(conn, device_id, start_date, end_date):
