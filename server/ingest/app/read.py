@@ -492,6 +492,22 @@ def query_workouts(conn, device_id, start_date, end_date):
     return [dict(zip(_WORKOUT_COLS, r)) for r in rows]
 
 
+def query_workouts_epoch(conn, device_id, start_ts: float, end_ts: float):
+    """Exercise sessions with start_ts in [start_ts, end_ts) (epoch seconds).
+
+    Used by the app for **local calendar days** (Europe/Madrid etc.) without
+    splitting bouts at UTC midnight.
+    """
+    rows = conn.execute(
+        f"SELECT {', '.join(_WORKOUT_COLS)} FROM exercise_sessions "
+        "WHERE device_id = %s "
+        "AND start_ts >= to_timestamp(%s) AND start_ts < to_timestamp(%s) "
+        "ORDER BY start_ts",
+        (device_id, start_ts, end_ts),
+    ).fetchall()
+    return [dict(zip(_WORKOUT_COLS, r)) for r in rows]
+
+
 _STRESS_COLS = ["device_id", "ts", "score", "rmssd_ms", "hr_bpm", "motion_var", "quality"]
 
 

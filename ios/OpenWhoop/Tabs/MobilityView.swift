@@ -1,4 +1,5 @@
 import SwiftUI
+import WhoopStore
 
 // MARK: - MobilityView
 
@@ -21,17 +22,24 @@ struct MobilityView: View {
     @State private var sleepNights = 0
     @State private var showSessionRunner = false
     @State private var showingHistory = false
-    @State private var todayWorkouts: [Workout] = []
+    @State private var dayWorkouts: [Workout] = []
+    @State private var selectedDayMetric: DailyMetric?
+
+    private var selectedDate: Date { tabRouter.selectedDate }
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(selectedDate)
+    }
 
     private var dayKey: String {
-        MetricsRepository.localDayString(for: Date())
+        MetricsRepository.localDayString(for: selectedDate)
     }
 
     private var trainingContext: DayTrainingContext {
         dayPlanStore.trainingContext(
             dayKey: dayKey,
-            calendarDate: Date(),
-            workouts: todayWorkouts,
+            calendarDate: selectedDate,
+            workouts: dayWorkouts,
             labelStore: labelStore,
             prvnStore: prvnStore,
             isTrainingBout: isTrainingBout
@@ -55,11 +63,15 @@ struct MobilityView: View {
     }
 
     private var recoveryPercentToday: Int? {
-        TodayMetricHelpers.recoveryPercent(
-            sleep: metrics.lastNight,
-            daily: metrics.today,
-            sleepNights: sleepNights
-        ).map { Int($0.percent.rounded()) }
+        if let r = selectedDayMetric?.recovery { return Int(r.rounded()) }
+        if isViewingToday {
+            return TodayMetricHelpers.recoveryPercent(
+                sleep: metrics.lastNight,
+                daily: metrics.today,
+                sleepNights: sleepNights
+            ).map { Int($0.percent.rounded()) }
+        }
+        return nil
     }
 
     var body: some View {
@@ -86,12 +98,12 @@ struct MobilityView: View {
             .sheet(isPresented: $showingDayEditor) {
                 DayWorkoutEditorView(
                     dayKey: dayKey,
-                    selectedDate: Date(),
-                    workouts: todayWorkouts,
+                    selectedDate: selectedDate,
+                    workouts: dayWorkouts,
                     labelStore: labelStore,
                     dayPlanStore: dayPlanStore,
                     programStore: prvnStore,
-                    prvnDay: prvnStore.program(for: Date()),
+                    prvnDay: prvnStore.program(for: selectedDate),
                     isTrainingBout: isTrainingBout
                 )
             }
@@ -102,9 +114,12 @@ struct MobilityView: View {
             .onChange(of: tabRouter.pendingMobilitySession) { _ in
                 applyPendingMobilitySession()
             }
+            .onChange(of: tabRouter.selectedDate) { _ in
+                Task { await reloadDayWorkouts() }
+            }
             .task {
                 sleepNights = await metrics.sleepNightCount()
-                await reloadTodayWorkouts()
+                await reloadDayWorkouts()
             }
             .fullScreenCover(isPresented: $showSessionRunner) {
                 if let routine {
@@ -152,6 +167,8 @@ struct MobilityView: View {
                     }
                     .accessibilityLabel("Áreas de foco")
                 }
+
+                DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)
 
                 trainingContextCard(ctx)
 
@@ -315,7 +332,9 @@ struct MobilityView: View {
                 HStack(spacing: WH.Spacing.xs) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(WH.Color.recoveryGreen)
-                    Text("Completada hoy · \(done.exerciseCount) ejercicios")
+                    Text(isViewingToday
+                         ? "Completada hoy · \(done.exerciseCount) ejercicios"
+                         : "Completada · \(done.exerciseCount) ejercicios")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(WH.Color.textSecondary)
                 }
@@ -354,14 +373,19 @@ struct MobilityView: View {
         !labelStore.isDismissed(w.id)
             && (labelStore.isConfirmed(w) || ActivityBoutClassifier.assess(
                 w,
-                among: todayWorkouts,
+                among: dayWorkouts,
                 isConfirmed: labelStore.isConfirmed(w),
                 isDismissed: labelStore.isDismissed(w.id)
             ).category == .likelyWorkout)
     }
 
-    private func reloadTodayWorkouts() async {
+    private func reloadDayWorkouts() async {
         let key = dayKey
-        todayWorkouts = await metrics.workouts(from: key, to: key)
+        dayWorkouts = await metrics.workouts(from: key, to: key)
+        if isViewingToday {
+            selectedDayMetric = metrics.today
+        } else {
+            selectedDayMetric = await metrics.dailyMetric(forDay: key)
+        }
     }
 }

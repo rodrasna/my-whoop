@@ -11,6 +11,7 @@ enum ActivityRoute: Hashable { case crossfit, suggestDemo }
 struct WorkoutsView: View {
     @EnvironmentObject private var metrics: MetricsRepository
     @EnvironmentObject private var dayPlanStore: WorkoutDayPlanStore
+    @EnvironmentObject private var tabRouter: RootTabRouter
     @StateObject private var labelStore = ActivityLabelStore()
     @StateObject private var programStore = PRVNProgramStore.shared
     @State private var showProgramImport = false
@@ -21,8 +22,8 @@ struct WorkoutsView: View {
 
     @State private var workouts: [Workout] = []
     @State private var weekRows: [DailyMetric] = []
-    @State private var selectedDate = Calendar.current.startOfDay(for: Date())
     @State private var selectedDayMetric: DailyMetric?
+    @State private var collapsedSections: Set<DayActivitySection> = [.hrSignals]
     @State private var isLoading = true
     @State private var errorMessage: String? = nil
     @State private var path: [ActivityRoute] = []
@@ -97,7 +98,8 @@ struct WorkoutsView: View {
         .sheet(item: $pickerWorkout) { workout in
             ActivityPickerView(workout: workout, labelStore: labelStore)
         }
-        .onChange(of: selectedDate) { _ in
+        .onChange(of: tabRouter.selectedDate) { _ in
+            collapsedSections = [.hrSignals]
             Task {
                 await reloadWeekRows()
                 await reloadSelectedDay()
@@ -105,6 +107,8 @@ struct WorkoutsView: View {
             }
         }
     }
+
+    private var selectedDate: Date { tabRouter.selectedDate }
 
     // MARK: - Coach analysis
 
@@ -185,7 +189,7 @@ struct WorkoutsView: View {
                         .font(WH.Font.cardTitle)
                         .foregroundStyle(WH.Color.textSecondary)
                         .tracking(1.2)
-                    DayNavigator(selectedDate: $selectedDate, showsCalendarPicker: true)
+                    DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)
                 }
                 .padding(.horizontal, WH.Spacing.md)
 
@@ -197,6 +201,8 @@ struct WorkoutsView: View {
                 if let recommendation = activityRecommendation {
                     ActivityRecommendationCard(recommendation: recommendation)
                 }
+                workoutsSection
+
                 PRVNTodayProgramCard(
                     store: programStore,
                     date: selectedDate,
@@ -218,8 +224,6 @@ struct WorkoutsView: View {
                     )
                     .padding(.horizontal, WH.Spacing.md)
                 }
-
-                workoutsSection
             }
             .padding(.bottom, WH.Spacing.xl)
         }
@@ -428,6 +432,16 @@ struct WorkoutsView: View {
             .sorted { $0.startTs > $1.startTs }
     }
 
+    private var activityGroups: [DayActivitySections.Grouped] {
+        DayActivitySections.group(
+            workouts: selectedDayActivities,
+            assess: assessment(for:),
+            isConfirmed: { labelStore.isConfirmed($0) },
+            isDismissed: { labelStore.isDismissed($0.id) },
+            hasActivityOnlyLabel: { labelStore.activityOnlyType(for: $0) != nil }
+        )
+    }
+
     private func isOnSelectedDay(_ ts: Int) -> Bool {
         Calendar.current.isDate(
             Date(timeIntervalSince1970: TimeInterval(ts)),
@@ -441,14 +455,20 @@ struct WorkoutsView: View {
     }
 
     private var dayActivitiesSubtitle: String {
-        let n = selectedDayActivities.count
-        let entrenos = selectedDayActivities.filter(isTrainingBout).count
-        let otras = n - entrenos
-        if n == 0 { return "Sin actividad detectada" }
-        var parts: [String] = ["\(n) detectada\(n == 1 ? "" : "s")"]
-        if entrenos > 0 { parts.append("\(entrenos) entreno\(entrenos == 1 ? "" : "s")") }
-        if otras > 0 { parts.append("\(otras) otra\(otras == 1 ? "" : "s")") }
-        return parts.joined(separator: " · ")
+        let groups = activityGroups
+        if groups.isEmpty { return "Sin actividad detectada" }
+        return groups.map { group in
+            let n = group.items.count
+            let label: String = {
+                switch group.section {
+                case .workouts:    return n == 1 ? "entreno" : "entrenos"
+                case .life:        return n == 1 ? "actividad" : "actividades"
+                case .dailyRhythm: return n == 1 ? "ritmo" : "ritmos"
+                case .hrSignals:   return n == 1 ? "señal FC" : "señales FC"
+                }
+            }()
+            return "\(n) \(label)"
+        }.joined(separator: " · ")
     }
 
     private var activityListTitle: String {
@@ -463,7 +483,7 @@ struct WorkoutsView: View {
         VStack(alignment: .leading, spacing: WH.Spacing.lg) {
             dayWorkoutCard
             summaryStrip
-            if selectedDayActivities.isEmpty {
+            if activityGroups.isEmpty {
                 VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                     Text(activityListTitle)
                         .font(WH.Font.cardTitle)
@@ -473,28 +493,101 @@ struct WorkoutsView: View {
                     emptyState
                 }
             } else {
-                boutSection(
-                    title: activityListTitle,
-                    subtitle: dayActivitiesSubtitle,
-                    items: selectedDayActivities
-                )
+                VStack(alignment: .leading, spacing: WH.Spacing.xs) {
+                    Text(activityListTitle)
+                        .font(WH.Font.cardTitle)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .tracking(1.2)
+                    Text(dayActivitiesSubtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(WH.Color.textSecondary.opacity(0.75))
+                }
+                .padding(.horizontal, WH.Spacing.md)
+
+                ForEach(activityGroups, id: \.section) { group in
+                    activityGroupSection(group)
+                }
                 autoDetectNote
             }
         }
     }
 
+    private func activityGroupSection(_ group: DayActivitySections.Grouped) -> some View {
+        let collapsed = collapsedSections.contains(group.section)
+        return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
+            Button {
+                guard group.section.collapsedByDefault else { return }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if collapsed {
+                        collapsedSections.remove(group.section)
+                    } else {
+                        collapsedSections.insert(group.section)
+                    }
+                }
+            } label: {
+                HStack(alignment: .top, spacing: WH.Spacing.sm) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(group.section.title)
+                            .font(WH.Font.cardTitle)
+                            .foregroundStyle(sectionAccent(group.section))
+                            .tracking(1.2)
+                        Text(group.section.subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: WH.Spacing.xs)
+                    Text("\(group.items.count)")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(sectionAccent(group.section))
+                        .monospacedDigit()
+                    if group.section.collapsedByDefault {
+                        Text(collapsed ? "Ver" : "Ocultar")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(WH.Color.strainBlue)
+                        Image(systemName: collapsed ? "chevron.down" : "chevron.up")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(WH.Color.textSecondary)
+                    }
+                }
+                .padding(.horizontal, WH.Spacing.md)
+            }
+            .buttonStyle(.plain)
+            .disabled(!group.section.collapsedByDefault)
+
+            if !collapsed || !group.section.collapsedByDefault {
+                boutSection(title: "", subtitle: "", items: group.items)
+            }
+        }
+    }
+
+    private func sectionAccent(_ section: DayActivitySection) -> Color {
+        switch section {
+        case .workouts:     return WH.Color.strainBlue
+        case .life:         return WH.Color.textSecondary
+        case .dailyRhythm:  return WH.Color.stressHigh
+        case .hrSignals:    return WH.Color.recoveryYellow
+        }
+    }
+
     private func boutSection(title: String, subtitle: String, items: [Workout]) -> some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(WH.Font.cardTitle)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .tracking(1.2)
-                Text(subtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(WH.Color.textSecondary.opacity(0.75))
+            if !title.isEmpty || !subtitle.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    if !title.isEmpty {
+                        Text(title)
+                            .font(WH.Font.cardTitle)
+                            .foregroundStyle(WH.Color.textSecondary)
+                            .tracking(1.2)
+                    }
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(WH.Color.textSecondary.opacity(0.75))
+                    }
+                }
+                .padding(.horizontal, WH.Spacing.md)
             }
-            .padding(.horizontal, WH.Spacing.md)
 
             VStack(spacing: 1) {
                 ForEach(items) { workout in
@@ -528,7 +621,7 @@ struct WorkoutsView: View {
     }
 
     private var summaryStrip: some View {
-        let train = selectedDayActivities.filter(isTrainingBout).count
+        let train = activityGroups.first(where: { $0.section == .workouts })?.items.count ?? 0
         let other = selectedDayActivities.count - train
         let dayMin = selectedDayActivities.reduce(0) { $0 + $1.durationS } / 60
         return HStack(spacing: WH.Spacing.lg) {
@@ -755,7 +848,7 @@ struct WorkoutsView: View {
             return "No hay métricas en caché. Comprueba que el Mac/servidor esté encendido y desliza para sincronizar."
         }
         if selectedDayStrain != nil {
-            return "Hay esfuerzo registrado pero ningún entreno concreto. Puedes definir el entreno manualmente o clasificar cuando aparezca."
+            return "Hay esfuerzo registrado pero ningún entreno concreto. Desliza para sincronizar — la app reintentará detectar actividades de ese día."
         }
         return "Las actividades se detectan a partir de tu frecuencia cardíaca. Si acabas de entrenar, puede tardar unos minutos en sincronizar. Desliza hacia abajo para actualizar."
     }
@@ -973,7 +1066,7 @@ struct WorkoutsView: View {
     }
 
     private func reloadWeekRows() async {
-        weekRows = await metrics.dailyLastDays(7)
+        weekRows = await metrics.dailyLastDays(7, endingOn: selectedDate)
     }
 
     private func reloadSelectedDay() async {
@@ -983,12 +1076,55 @@ struct WorkoutsView: View {
             let day = MetricsRepository.localDayString(for: selectedDate)
             selectedDayMetric = await metrics.dailyMetric(forDay: day)
         }
-        let resting = restingHr(for: selectedDate)
-        workouts = await metrics.supplementHRElevations(
-            in: workouts,
-            for: selectedDate,
-            restingHr: resting
+
+        let cal = Calendar.current
+        let dayKey = MetricsRepository.localDayString(for: selectedDate)
+        let prevKey = MetricsRepository.localDayString(
+            for: cal.date(byAdding: .day, value: -1, to: selectedDate) ?? selectedDate
         )
+        let startOfDay = cal.startOfDay(for: selectedDate)
+        guard let endOfDay = cal.date(byAdding: .day, value: 1, to: startOfDay) else { return }
+        let fromTs = Int(startOfDay.timeIntervalSince1970)
+        let toTs = Int(endOfDay.timeIntervalSince1970)
+
+        let resting = restingHr(for: selectedDate)
+
+        func loadDayWorkouts() async -> [Workout] {
+            var list = await metrics.workouts(fromEpoch: fromTs, toEpoch: toTs)
+            return await metrics.supplementHRElevations(in: list, for: selectedDate, restingHr: resting)
+        }
+
+        var dayList = await loadDayWorkouts()
+        // Never wipe the selected day when the per-day fetch failed but the bulk reload had rows.
+        if !dayList.isEmpty || selectedDayActivities.isEmpty {
+            replaceWorkouts(forSelectedDay: dayList)
+        }
+
+        let strainBeforeBackfill = strainForSelectedDayIgnoringActivities()
+        if dayList.filter({ isOnSelectedDay($0.startTs) }).isEmpty,
+           let strain = strainBeforeBackfill, strain > 0,
+           metrics.isServerConfigured {
+            _ = await metrics.backfillWorkouts(from: prevKey, to: dayKey)
+            dayList = await loadDayWorkouts()
+            replaceWorkouts(forSelectedDay: dayList)
+        }
+    }
+
+    /// Strain del día sin inferirlo desde actividades (para decidir backfill).
+    private func strainForSelectedDayIgnoringActivities() -> Double? {
+        let key = MetricsRepository.localDayString(for: selectedDate)
+        if isViewingToday, metrics.today?.day == key, let t = metrics.today?.strain, t > 0 {
+            return t
+        }
+        if let s = selectedDayMetric?.strain, s > 0 { return s }
+        return weekRows.first(where: { $0.day == key })?.strain
+    }
+
+    private func replaceWorkouts(forSelectedDay dayList: [Workout]) {
+        let kept = workouts.filter { !isOnSelectedDay($0.startTs) }
+        var byId = Dictionary(uniqueKeysWithValues: kept.map { ($0.id, $0) })
+        for w in dayList { byId[w.id] = w }
+        workouts = Array(byId.values)
     }
 
     private func restingHr(for day: Date) -> Int? {
@@ -1000,14 +1136,13 @@ struct WorkoutsView: View {
     }
 
     private func dateRange(daysBack: Int) -> (from: String, to: String) {
-        let cal = Calendar(identifier: .gregorian)
-        let fmt = DateFormatter()
-        fmt.calendar = cal
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        fmt.dateFormat = "yyyy-MM-dd"
-        let today = Date()
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
         let from = cal.date(byAdding: .day, value: -daysBack, to: today) ?? today
-        return (fmt.string(from: from), fmt.string(from: today))
+        return (
+            MetricsRepository.localDayString(for: from, calendar: cal),
+            MetricsRepository.localDayString(for: today, calendar: cal)
+        )
     }
 
     // MARK: - Formatting
@@ -1051,4 +1186,5 @@ struct WorkoutsView: View {
 #Preview("Actividad — vacío") {
     WorkoutsView()
         .environmentObject(MetricsRepository(deviceId: "preview"))
+        .environmentObject(RootTabRouter())
 }

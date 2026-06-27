@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 // MARK: - RootTabRouter
-// Navegación entre pestañas y deep links (p. ej. Actividad → Movilidad con sesión concreta).
+// Navegación entre pestañas, día seleccionado compartido y deep links.
 
 @MainActor
 final class RootTabRouter: ObservableObject {
@@ -16,6 +16,8 @@ final class RootTabRouter: ObservableObject {
     }
 
     @Published var selectedTab: Int
+    /// Día calendario activo en todas las pestañas (normalizado a medianoche local).
+    @Published var selectedDate: Date
     @Published private(set) var pendingMobilitySession: MobilitySessionKind?
 
     init() {
@@ -29,6 +31,7 @@ final class RootTabRouter: ObservableObject {
         if let i = args.firstIndex(of: "-mobilitySession"), i + 1 < args.count {
             pendingMobilitySession = MobilitySessionKind(rawValue: args[i + 1])
         }
+        selectedDate = Calendar.current.startOfDay(for: Date())
     }
 
     func openMobility(_ session: MobilitySessionKind) {

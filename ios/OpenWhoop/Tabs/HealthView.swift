@@ -6,10 +6,22 @@ import WhoopStore
 
 struct HealthView: View {
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var tabRouter: RootTabRouter
 
     @State private var baselines = BaselineCalculator.Averages()
     @State private var thirtyDayRows: [DailyMetric] = []
     @State private var weekPoints: [MetricKind: [TrendPoint]] = [:]
+    @State private var selectedDayMetric: DailyMetric?
+
+    private var selectedDate: Date { tabRouter.selectedDate }
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(selectedDate)
+    }
+
+    private var selectedDayLabel: String {
+        TodayMetricHelpers.todayLabel(for: selectedDate, isViewingToday: isViewingToday)
+    }
 
     var body: some View {
         NavigationStack {
@@ -19,8 +31,13 @@ struct HealthView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: WH.Spacing.lg) {
                         ScreenHeader("Salud")
+                        DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)
+                            .padding(.horizontal, WH.Spacing.md)
+                            .padding(.top, -WH.Spacing.sm)
 
-                        Text("Monitor de salud — valores de anoche y tendencia 7 días")
+                        Text(isViewingToday
+                             ? "Monitor de salud — valores de anoche y tendencia 7 días"
+                             : "Monitor de salud — \(selectedDayLabel.lowercased()) y tendencia 7 días")
                             .font(WH.Font.caption)
                             .foregroundStyle(WH.Color.textSecondary)
                             .padding(.horizontal, WH.Spacing.md)
@@ -52,31 +69,39 @@ struct HealthView: View {
         .onChange(of: metrics.lastRefreshedAt) { _ in
             Task { await reloadData() }
         }
+        .onChange(of: tabRouter.selectedDate) { _ in
+            Task { await reloadData() }
+        }
     }
 
     private func reloadData() async {
-        let cal = Calendar(identifier: .gregorian)
-        let fmt = DateFormatter()
-        fmt.calendar = cal
-        fmt.timeZone = TimeZone(identifier: "UTC")
-        fmt.dateFormat = "yyyy-MM-dd"
-        let today = Date()
-        let from30 = cal.date(byAdding: .day, value: -30, to: today) ?? today
-        let from7  = cal.date(byAdding: .day, value: -6, to: today) ?? today
-        thirtyDayRows = await metrics.daily(fromDay: fmt.string(from: from30),
-                                            toDay: fmt.string(from: today))
+        let cal = Calendar.current
+        let anchor = cal.startOfDay(for: selectedDate)
+        let from30 = cal.date(byAdding: .day, value: -30, to: anchor) ?? anchor
+        let from7  = cal.date(byAdding: .day, value: -6, to: anchor) ?? anchor
+        let dayKey = MetricsRepository.localDayString(for: anchor, calendar: cal)
+        thirtyDayRows = await metrics.daily(
+            fromDay: MetricsRepository.localDayString(for: from30, calendar: cal),
+            toDay: dayKey
+        )
+        if isViewingToday {
+            selectedDayMetric = metrics.today
+        } else {
+            selectedDayMetric = await metrics.dailyMetric(forDay: dayKey)
+        }
         baselines = BaselineCalculator.thirtyDay(from: thirtyDayRows,
-                                                 excludingDay: metrics.today?.day)
+                                                 excludingDay: isViewingToday ? metrics.today?.day : dayKey)
 
         var points: [MetricKind: [TrendPoint]] = [:]
         let weekRows = thirtyDayRows.filter { row in
-            guard let d = fmt.date(from: row.day) else { return false }
-            return d >= from7
+            guard let date = MetricsRepository.parseLocalDay(row.day, calendar: cal) else { return false }
+            return date >= from7 && date <= anchor
         }
         for kind in MetricKind.healthSignalCases {
             let pts = weekRows.compactMap { row -> TrendPoint? in
                 guard let val = kind.value(from: row),
-                      let date = fmt.date(from: row.day) else { return nil }
+                      val.isFinite,
+                      let date = MetricsRepository.parseLocalDay(row.day, calendar: cal) else { return nil }
                 return TrendPoint(id: row.day, date: date, value: val)
             }
             if pts.count >= 2 { points[kind] = pts }
@@ -87,7 +112,7 @@ struct HealthView: View {
     // MARK: - Today values
 
     private var todayCard: some View {
-        let d = metrics.today
+        let d = isViewingToday ? (selectedDayMetric ?? metrics.today) : selectedDayMetric
         return DashboardCard {
             healthLink(kind: .hrv) {
                 healthRow(icon: "waveform.path.ecg",
@@ -117,7 +142,7 @@ struct HealthView: View {
                           accent: WH.Color.sleepBlue,
                           baseline: average30d { $0.spo2Pct },
                           current: d?.spo2Pct,
-                          footnote: "Media nocturna")
+                          footnote: "Estimado · sin calibrar vs oxímetro")
             }
             DashboardDivider()
             healthLink(kind: .respRate) {
@@ -254,4 +279,5 @@ struct HealthView: View {
 #Preview {
     HealthView()
         .environmentObject(MetricsRepository(deviceId: "preview"))
+        .environmentObject(RootTabRouter())
 }

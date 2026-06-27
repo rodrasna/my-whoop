@@ -9,6 +9,7 @@ import WhoopStore
 struct TodayView: View {
     @EnvironmentObject private var metrics: MetricsRepository
     @EnvironmentObject private var live: LiveViewModel
+    @EnvironmentObject private var tabRouter: RootTabRouter
 
     @State private var weekRows: [DailyMetric] = []
     @State private var sleepNights = 0
@@ -16,7 +17,6 @@ struct TodayView: View {
     @State private var showingAlarm = false
     @State private var showingDevice = false
     @StateObject private var strapTimer = StrapTimerController.shared
-    @State private var selectedDate = Date()
     @State private var selectedDayMetric: DailyMetric?
     @State private var selectedNightSleep: CachedSleepSession?
     @State private var stressPoints: [StressPoint] = []
@@ -74,7 +74,7 @@ struct TodayView: View {
                 await reloadSleepNights()
             }
         }
-        .onChange(of: selectedDate) { _ in
+        .onChange(of: tabRouter.selectedDate) { _ in
             Task {
                 await reloadSelectedDay()
                 await reloadWeek()
@@ -83,6 +83,8 @@ struct TodayView: View {
     }
 
     // MARK: - Selected day context
+
+    private var selectedDate: Date { tabRouter.selectedDate }
 
     private var isViewingToday: Bool {
         Calendar.current.isDateInToday(selectedDate)
@@ -160,9 +162,13 @@ struct TodayView: View {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
                 // Day navigator + strap status (official-style top chrome)
-                TodayTopBar(selectedDate: $selectedDate,
+                TodayTopBar(selectedDate: $tabRouter.selectedDate,
                             liveState: live.state,
                             onDeviceTap: { showingDevice = true })
+
+                if isViewingToday {
+                    suenoEstaNocheCard
+                }
 
                 // Anillos Sueño · Recuperación · Esfuerzo (estilo WHOOP)
                 TriRingHeader(sleepFraction: sleepFraction,
@@ -305,7 +311,6 @@ struct TodayView: View {
             sectionLabel("Mi día")
             actividadHoyCard
             if isViewingToday {
-                suenoEstaNocheCard
                 StrapTimerCard(timer: strapTimer)
                     .environmentObject(live)
             }

@@ -9,11 +9,10 @@ import WhoopStore
 
 struct SleepView: View {
     @EnvironmentObject private var metrics: MetricsRepository
-    /// LiveViewModel injected so we can pass it to AlarmView's sheet (iOS 16 env-object safety).
     @EnvironmentObject private var live: LiveViewModel
+    @EnvironmentObject private var tabRouter: RootTabRouter
 
     // Local async state
-    @State private var selectedDate = Date()
     @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
     @State private var weekNights: [CachedSleepSession] = []
     @State private var naps: [CachedSleepSession] = []
@@ -67,10 +66,14 @@ struct SleepView: View {
         .onChange(of: metrics.lastRefreshedAt) { _ in
             Task { await reloadLocal() }
         }
-        .onChange(of: selectedDate) { _ in
+        .onChange(of: tabRouter.selectedDate) { _ in
             Task { await reloadLocal() }
         }
     }
+
+    // MARK: - Selected day
+
+    private var selectedDate: Date { tabRouter.selectedDate }
 
     // MARK: - Data loading
 
@@ -127,7 +130,7 @@ struct SleepView: View {
 
                 // Custom tight header (replaces the hidden system large-title nav bar)
                 ScreenHeader("Sueño")
-                DayNavigator(selectedDate: $selectedDate, showsCalendarPicker: true)
+                DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)
                     .padding(.bottom, WH.Spacing.xs)
 
                 SleepCheckInCard(
@@ -286,14 +289,13 @@ struct SleepView: View {
             ))
         }
 
-        if let reg = SleepQualityBuilder.regularityScore(from: weekNights) {
-            let nightCount = weekNights.filter { $0.isMainNight }.count
+        if let stats = SleepQualityBuilder.regularityStats(from: weekNights) {
             rows.append(.init(
                 id: "regularity",
-                title: "Regularidad del sueño",
-                value: "\(Int(reg.rounded()))%",
-                context: SleepQualityBuilder.regularityContext(score: reg, nights: max(nightCount, weekNights.count)),
-                gaugeValue: reg
+                title: "Consistencia horaria",
+                value: "\(Int(stats.score.rounded()))%",
+                context: SleepQualityBuilder.regularityContext(stats: stats),
+                gaugeValue: stats.score
             ))
         }
 
@@ -530,7 +532,7 @@ struct SleepView: View {
                 if let session {
                     NavigationLink(destination: SleepSpo2ChartView(session: session)) {
                         MetricCard(
-                            title: "Saturación de oxígeno",
+                            title: "SpO₂ estimada",
                             value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
                             unit: daily?.spo2Pct != nil ? "%" : nil,
                             accentColor: daily?.spo2Pct != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
@@ -541,7 +543,7 @@ struct SleepView: View {
                     .buttonStyle(.plain)
                 } else {
                     MetricCard(
-                        title: "Saturación de oxígeno",
+                        title: "SpO₂ estimada",
                         value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
                         unit: daily?.spo2Pct != nil ? "%" : nil,
                         accentColor: daily?.spo2Pct != nil ? WH.Color.sleepBlue : WH.Color.textSecondary

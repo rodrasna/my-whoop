@@ -471,11 +471,22 @@ def post_prvn_sync(body: PRVNSyncBody):
 
 @app.get("/v1/workouts", dependencies=[Depends(require_auth)])
 def get_workouts(device: str,
-                 from_: str = Query(..., alias="from"),
-                 to: str = Query(..., alias="to")):
-    """Exercise sessions whose start_ts (UTC date) is in [from, to] (YYYY-MM-DD)."""
-    start, end = _parse_date(from_), _parse_date(to)
+                 from_: str | None = Query(None, alias="from"),
+                 to: str | None = Query(None, alias="to"),
+                 from_ts: int | None = Query(None, alias="from_ts"),
+                 to_ts: int | None = Query(None, alias="to_ts")):
+    """Exercise sessions for a device.
+
+    Either pass ``from``/``to`` (YYYY-MM-DD, UTC calendar date of start_ts) or
+    ``from_ts``/``to_ts`` (unix seconds, half-open [from_ts, to_ts)) for local-day
+    windows from the app.
+    """
     with psycopg.connect(cfg.db_dsn) as conn:
+        if from_ts is not None and to_ts is not None:
+            return read.query_workouts_epoch(conn, device, float(from_ts), float(to_ts))
+        if from_ is None or to is None:
+            raise HTTPException(status_code=422, detail="provide from/to (dates) or from_ts/to_ts")
+        start, end = _parse_date(from_), _parse_date(to)
         return read.query_workouts(conn, device, start, end)
 
 

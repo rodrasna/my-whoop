@@ -420,9 +420,31 @@ final class ServerSync {
     /// Returns [] on any network/parse error — callers treat this as "no data, try again later".
     func getWorkouts(from: String, to: String) async -> [Workout] {
         let path = "/v1/workouts?device=\(deviceId)&from=\(from)&to=\(to)"
+        return await fetchWorkouts(path: path)
+    }
+
+    /// GET /v1/workouts with epoch bounds [from_ts, to_ts) — matches local calendar days.
+    /// Falls back to a UTC-date query when the server does not support ``from_ts`` (HTTP non-2xx).
+    func getWorkouts(fromEpoch: Int, toEpoch: Int) async -> [Workout] {
+        let path = "/v1/workouts?device=\(deviceId)&from_ts=\(fromEpoch)&to_ts=\(toEpoch)"
+        let (epochWorkouts, ok) = await fetchWorkoutsWithStatus(path: path)
+        if ok { return epochWorkouts }
+        let day = MetricsRepository.localDayString(
+            for: Date(timeIntervalSince1970: TimeInterval(fromEpoch))
+        )
+        return await getWorkouts(from: day, to: day)
+    }
+
+    private func fetchWorkouts(path: String) async -> [Workout] {
+        let (workouts, _) = await fetchWorkoutsWithStatus(path: path)
+        return workouts
+    }
+
+    /// Returns parsed workouts and whether the HTTP request succeeded (2xx + JSON array).
+    private func fetchWorkoutsWithStatus(path: String) async -> (workouts: [Workout], ok: Bool) {
         guard let body = await get(path: path),
               let arr = (try? JSONSerialization.jsonObject(with: body)) as? [[String: Any]] else {
-            return []
+            return ([], false)
         }
         let int = ServerSync.int
         let dbl = ServerSync.dbl
@@ -469,7 +491,7 @@ final class ServerSync {
             )
         }
         // Server returns ascending; we reverse so newest is first (list view shows newest at top).
-        return workouts.reversed()
+        return (workouts.reversed(), true)
     }
 
     // MARK: - ts parsing
