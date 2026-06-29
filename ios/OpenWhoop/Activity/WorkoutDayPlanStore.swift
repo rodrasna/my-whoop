@@ -147,8 +147,13 @@ final class WorkoutDayPlanStore: ObservableObject {
 
         let blocksDone: [ProgramBlockKind] = {
             if let saved, !saved.blocksDone.isEmpty { return saved.blocksDone.sorted(by: blockSort) }
-            if let prvn = prvnDay {
-                return prvn.blocks.map(\.kind).filter { $0 != .other }.sorted(by: blockSort)
+            guard let prvn = prvnDay else { return [] }
+            let inferred = prvn.blocks.map(\.kind).filter { $0 != .other }.sorted(by: blockSort)
+            if let saved, saved.primaryWorkoutId != nil || saved.activityType != nil || saved.crossfitStyle != nil {
+                return inferred
+            }
+            if let primary, isTrainingBout(primary) {
+                return inferred
             }
             return []
         }()

@@ -156,6 +156,13 @@ extension WhoopStore {
                 t.add(column: "kind", .text).defaults(to: "main")
             }
         }
+        migrator.registerMigration("v9") { db in
+            try db.alter(table: "dailyMetric") { t in
+                t.add(column: "sleepScore", .double)
+                t.add(column: "sleepScoreObjective", .double)
+                t.add(column: "sleepScoreBreakdownJSON", .text)
+            }
+        }
         return migrator
     }
 }

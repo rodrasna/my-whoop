@@ -48,7 +48,7 @@ struct MetricChart: View {
 
     private var effectiveDomain: ClosedRange<Double> {
         let base = yDomain ?? kind.fixedYDomain
-        let vals = series.map(\.value)
+        let vals = series.map(\.value).filter(\.isFinite)
         let minVal = vals.min() ?? 0
         let maxVal = vals.max() ?? 1
 
@@ -62,6 +62,7 @@ struct MetricChart: View {
             lo = max(0, minVal - pad)
             hi = maxVal + pad
         }
+        guard lo.isFinite, hi.isFinite, lo < hi else { return 0...1 }
         return lo...hi
     }
 

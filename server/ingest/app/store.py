@@ -110,9 +110,10 @@ def upsert_daily_metrics(conn: psycopg.Connection, device_id: str, day, metrics:
            (device_id, day, total_sleep_min, efficiency, deep_min, rem_min, light_min,
             disturbances, resting_hr, avg_hrv, recovery, strain, exercise_count,
             sleep_start, sleep_end, spo2_pct, skin_temp_dev_c, resp_rate_bpm,
-            stress_avg, stress_peak, computed_at)
+            stress_avg, stress_peak, sleep_score, sleep_score_objective, sleep_score_breakdown,
+            computed_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s, now())
+                   to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s, %s, now())
            ON CONFLICT (device_id, day) DO UPDATE SET
              total_sleep_min = EXCLUDED.total_sleep_min,
              efficiency      = EXCLUDED.efficiency,
@@ -132,6 +133,9 @@ def upsert_daily_metrics(conn: psycopg.Connection, device_id: str, day, metrics:
              resp_rate_bpm   = EXCLUDED.resp_rate_bpm,
              stress_avg      = EXCLUDED.stress_avg,
              stress_peak     = EXCLUDED.stress_peak,
+             sleep_score           = EXCLUDED.sleep_score,
+             sleep_score_objective = EXCLUDED.sleep_score_objective,
+             sleep_score_breakdown = EXCLUDED.sleep_score_breakdown,
              computed_at     = now()""",
         (device_id, day, metrics.get("total_sleep_min"), metrics.get("efficiency"),
          metrics.get("deep_min"), metrics.get("rem_min"), metrics.get("light_min"),
@@ -139,7 +143,33 @@ def upsert_daily_metrics(conn: psycopg.Connection, device_id: str, day, metrics:
          metrics.get("recovery"), metrics.get("strain"), metrics.get("exercise_count"),
          metrics.get("sleep_start"), metrics.get("sleep_end"),
          metrics.get("spo2_pct"), metrics.get("skin_temp_dev_c"), metrics.get("resp_rate_bpm"),
-         metrics.get("stress_avg"), metrics.get("stress_peak")),
+         metrics.get("stress_avg"), metrics.get("stress_peak"),
+         metrics.get("sleep_score"), metrics.get("sleep_score_objective"),
+         json.dumps(metrics.get("sleep_score_breakdown"))
+         if metrics.get("sleep_score_breakdown") is not None else None),
+    )
+
+
+def update_daily_sleep_scores(
+    conn: psycopg.Connection,
+    device_id: str,
+    day,
+    *,
+    sleep_score: float,
+    sleep_score_objective: float,
+    sleep_score_breakdown: dict | None,
+) -> None:
+    """Patch only composite sleep score columns (e.g. after check-in upsert)."""
+    conn.execute(
+        """UPDATE daily_metrics
+           SET sleep_score = %s,
+               sleep_score_objective = %s,
+               sleep_score_breakdown = %s,
+               computed_at = now()
+           WHERE device_id = %s AND day = %s""",
+        (sleep_score, sleep_score_objective,
+         json.dumps(sleep_score_breakdown) if sleep_score_breakdown is not None else None,
+         device_id, day),
     )
 
 

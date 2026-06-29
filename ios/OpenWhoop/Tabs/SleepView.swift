@@ -142,7 +142,9 @@ struct SleepView: View {
 
                 SleepCheckInCorrelationCard()
 
-                // 1. Headline — efficiency hero + total duration
+                SleepInsightsCard()
+
+                // 1. Headline — composite sleep score hero + total duration
                 headlineSection
 
                 sleepQualityCard
@@ -205,22 +207,32 @@ struct SleepView: View {
         let session = detail?.session
         let daily = detail?.daily
 
-        let efficiencyPct: Double? = {
-            if let e = session?.efficiency, e > 0 { return e * 100 }
-            if let e = daily?.efficiency, e > 0 { return e * 100 }
-            return nil
-        }()
+        let scorePct = TodayMetricHelpers.sleepScorePercent(daily: daily, sleep: session)
 
         return VStack(spacing: WH.Spacing.sm) {
-            if let score = efficiencyPct {
+            if let score = scorePct {
                 SleepPerformanceRing(scorePercent: score)
                     .frame(maxWidth: .infinity)
                     .padding(.top, WH.Spacing.sm)
-                Text("Porcentaje de tiempo dormido vs. tiempo en cama (no es cómo te sientes).")
-                    .font(WH.Font.caption)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, WH.Spacing.sm)
+                if let breakdown = daily?.sleepScoreBreakdown, breakdown.subjective != nil {
+                    Text(alignmentCaption(breakdown.alignment))
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, WH.Spacing.sm)
+                } else if daily?.sleepScoreBreakdown?.provisional == true {
+                    Text("Score provisional — se afina con más noches y tu cuestionario matutino.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, WH.Spacing.sm)
+                } else {
+                    Text("Cantidad, eficiencia, arquitectura y consistencia (pulsera).")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, WH.Spacing.sm)
+                }
             } else {
                 Text("Sin datos de sueño · \(selectedDayLabel)")
                     .font(WH.Font.caption)
@@ -239,66 +251,31 @@ struct SleepView: View {
         }
     }
 
+    private func alignmentCaption(_ alignment: String?) -> String {
+        switch alignment {
+        case "strap_higher":
+            return "La pulsera puntúa mejor noche de la que sentiste — el cuestionario ajusta el score."
+        case "body_higher":
+            return "Te sientes mejor de lo que miden los sensores — tu sensación cuenta en el score."
+        case "aligned":
+            return "Tu sensación encaja con las métricas de la pulsera."
+        default:
+            return "Score compuesto: pulsera + cuestionario matutino cuando lo completas."
+        }
+    }
+
     // MARK: - Sub-métricas de sueño (tarjeta bajo el anillo, estilo WHOOP)
 
     private var sleepQualityCard: some View {
-        let session = detail?.session
         let daily = detail?.daily
-
-        let efficiencyPct: Double? = {
-            if let e = session?.efficiency, e > 0 { return e * 100 }
-            if let e = daily?.efficiency, e > 0 { return e * 100 }
-            return nil
-        }()
-
-        let asleepMin: Double? = {
-            if let m = daily?.totalSleepMin, m > 0 { return m }
-            if let s = session {
-                let d = Double(s.endTs - s.startTs) / 60
-                return d > 0 ? d : nil
-            }
-            return nil
-        }()
-
-        let needMin: Double = 480
-        var rows: [SleepQualityMetricsCard.Row] = []
-
-        if let eff = efficiencyPct {
-            let band: String = {
-                if eff >= 85 { return "Óptimo" }
-                if eff >= 70 { return "Suficiente" }
-                return "Deficiente"
-            }()
-            rows.append(.init(
-                id: "efficiency",
-                title: "Eficiencia del sueño",
-                value: "\(Int(eff.rounded()))%",
-                context: "Tiempo dormido vs. tiempo en cama · \(band)",
-                gaugeValue: eff
-            ))
-        }
-
-        if let slept = asleepMin {
-            let pct = min(100, slept / needMin * 100)
-            rows.append(.init(
-                id: "hours",
-                title: "Horas vs. lo necesario",
-                value: "\(formatMinutes(slept)) / 8h",
-                context: pct >= 100 ? "Cumples el objetivo de sueño" : "Faltan \(formatMinutes(max(0, needMin - slept))) para 8h",
-                gaugeValue: pct
-            ))
-        }
-
-        if let stats = SleepQualityBuilder.regularityStats(from: weekNights) {
-            rows.append(.init(
-                id: "regularity",
-                title: "Consistencia horaria",
-                value: "\(Int(stats.score.rounded()))%",
-                context: SleepQualityBuilder.regularityContext(stats: stats),
-                gaugeValue: stats.score
-            ))
-        }
-
+        let checkIn = SleepCheckInStore.shared.entry(
+            forDayKey: MetricsRepository.localDayString(for: selectedDate))
+        let rows = SleepQualityBuilder.metricRows(
+            daily: daily,
+            weekNights: weekNights,
+            subjectiveFeeling: checkIn?.feelingScore,
+            alignment: daily?.sleepScoreBreakdown?.alignment ?? checkIn?.analysis?.alignment
+        )
         return SleepQualityMetricsCard(rows: rows)
     }
 

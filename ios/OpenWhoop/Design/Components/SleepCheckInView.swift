@@ -279,20 +279,45 @@ struct SleepCheckInView: View {
 
     private func save() {
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        let checkIn = SleepCheckIn(
-            dayKey: dayKey,
-            morningFeeling: feeling,
-            onset: onset,
-            factors: factors,
-            note: trimmed.isEmpty ? nil : trimmed,
-            savedAt: Date(),
-            recoveryPct: recoveryPct,
-            sleepEfficiencyPct: sleepEfficiencyPct,
-            voiceTranscript: voiceTranscript.isEmpty ? nil : voiceTranscript,
-            analysis: analysis
-        )
-        SleepCheckInStore.shared.save(checkIn)
-        Task { await metrics.pushSleepCheckIn(checkIn) }
-        dismiss()
+        Task {
+            var resolvedAnalysis = analysis
+            if resolvedAnalysis == nil, metrics.isServerConfigured {
+                let transcript = buildAnalyzeTranscript(note: trimmed)
+                if let result = await metrics.analyzeSleepCheckIn(
+                    transcript: transcript,
+                    dayKey: dayKey,
+                    recoveryPct: recoveryPct,
+                    sleepEfficiencyPct: sleepEfficiencyPct
+                ) {
+                    resolvedAnalysis = result.analysis
+                }
+            }
+            let checkIn = SleepCheckIn(
+                dayKey: dayKey,
+                morningFeeling: feeling,
+                onset: onset,
+                factors: factors,
+                note: trimmed.isEmpty ? nil : trimmed,
+                savedAt: Date(),
+                recoveryPct: recoveryPct,
+                sleepEfficiencyPct: sleepEfficiencyPct,
+                voiceTranscript: voiceTranscript.isEmpty ? nil : voiceTranscript,
+                analysis: resolvedAnalysis
+            )
+            SleepCheckInStore.shared.save(checkIn)
+            await metrics.pushSleepCheckIn(checkIn)
+            dismiss()
+        }
+    }
+
+    private func buildAnalyzeTranscript(note: String) -> String {
+        var parts = ["Me levanto \(feeling.label.lowercased())"]
+        parts.append(onset == .hard ? "Me costó dormir" : (onset == .easy ? "Dormí rápido" : "Dormí normal"))
+        if !factors.isEmpty {
+            let labels = factors.map(\.label).joined(separator: ", ")
+            parts.append("Factores: \(labels)")
+        }
+        if !note.isEmpty { parts.append(note) }
+        return parts.joined(separator: ". ")
     }
 }

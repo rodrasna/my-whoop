@@ -58,7 +58,13 @@ struct MobilitySessionRunnerView: View {
 
                     MobilityExerciseImageView(exercise: exercise, size: 160)
 
-                    Text(exercise.name)
+                    if let side = step?.side {
+                        Text(side.label)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(WH.Color.strainBlue)
+                    }
+
+                    Text(step?.displayTitle ?? exercise.name)
                         .font(.system(size: 22, weight: .bold, design: .rounded))
                         .foregroundStyle(WH.Color.textPrimary)
                         .multilineTextAlignment(.center)

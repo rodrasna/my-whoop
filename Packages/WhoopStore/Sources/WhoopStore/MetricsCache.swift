@@ -32,6 +32,39 @@ public struct CachedSleepSession: Equatable, Codable {
     public var isNap: Bool { kind == "nap" }
 }
 
+/// Breakdown of composite sleep score from server (`sleep_score_breakdown` JSON).
+public struct SleepScoreBreakdown: Equatable, Codable {
+    public let objective: Double?
+    public let subjective: Double?
+    public let final: Double?
+    public let subjectiveBlend: Double?
+    public let alignment: String?
+    public let provisional: Bool?
+    public let sleepNeedMin: Double?
+    public let components: Components?
+    public let weights: Weights?
+
+    public struct Components: Equatable, Codable {
+        public let quantity: Double?
+        public let efficiency: Double?
+        public let architecture: Double?
+        public let consistency: Double?
+    }
+
+    public struct Weights: Equatable, Codable {
+        public let quantity: Double?
+        public let efficiency: Double?
+        public let architecture: Double?
+        public let consistency: Double?
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case objective, subjective, final, alignment, provisional, components, weights
+        case subjectiveBlend = "subjective_blend"
+        case sleepNeedMin = "sleep_need_min"
+    }
+}
+
 /// One cached daily-metrics row pulled from the server's /v1/daily. Natural key (deviceId, day).
 public struct DailyMetric: Equatable, Codable {
     public let day: String           // YYYY-MM-DD
@@ -50,15 +83,30 @@ public struct DailyMetric: Equatable, Codable {
     public let spo2Pct: Double?        // mean SpO2 (%) during sleep
     public let skinTempDevC: Double?   // skin-temperature deviation (°C) from baseline
     public let respRateBpm: Double?    // mean respiration rate (breaths/min) during sleep
+    /// Composite sleep score 0–100 (objective + optional subjective check-in).
+    public let sleepScore: Double?
+    public let sleepScoreObjective: Double?
+    public let sleepScoreBreakdownJSON: String?
+
+    public var sleepScoreBreakdown: SleepScoreBreakdown? {
+        guard let sleepScoreBreakdownJSON,
+              let data = sleepScoreBreakdownJSON.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(SleepScoreBreakdown.self, from: data)
+    }
+
     public init(day: String, totalSleepMin: Double?, efficiency: Double?, deepMin: Double?,
                 remMin: Double?, lightMin: Double?, disturbances: Int?, restingHr: Int?,
                 avgHrv: Double?, recovery: Double?, strain: Double?, exerciseCount: Int?,
-                spo2Pct: Double? = nil, skinTempDevC: Double? = nil, respRateBpm: Double? = nil) {
+                spo2Pct: Double? = nil, skinTempDevC: Double? = nil, respRateBpm: Double? = nil,
+                sleepScore: Double? = nil, sleepScoreObjective: Double? = nil,
+                sleepScoreBreakdownJSON: String? = nil) {
         self.day = day; self.totalSleepMin = totalSleepMin; self.efficiency = efficiency
         self.deepMin = deepMin; self.remMin = remMin; self.lightMin = lightMin
         self.disturbances = disturbances; self.restingHr = restingHr; self.avgHrv = avgHrv
         self.recovery = recovery; self.strain = strain; self.exerciseCount = exerciseCount
         self.spo2Pct = spo2Pct; self.skinTempDevC = skinTempDevC; self.respRateBpm = respRateBpm
+        self.sleepScore = sleepScore; self.sleepScoreObjective = sleepScoreObjective
+        self.sleepScoreBreakdownJSON = sleepScoreBreakdownJSON
     }
 }
 
@@ -101,8 +149,9 @@ extension WhoopStore {
                     INSERT INTO dailyMetric
                         (deviceId, day, totalSleepMin, efficiency, deepMin, remMin, lightMin,
                          disturbances, restingHr, avgHrv, recovery, strain, exerciseCount,
-                         spo2Pct, skinTempDevC, respRateBpm)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         spo2Pct, skinTempDevC, respRateBpm, sleepScore, sleepScoreObjective,
+                         sleepScoreBreakdownJSON)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(deviceId, day) DO UPDATE SET
                         totalSleepMin = excluded.totalSleepMin,
                         efficiency = excluded.efficiency,
@@ -117,11 +166,15 @@ extension WhoopStore {
                         exerciseCount = excluded.exerciseCount,
                         spo2Pct = excluded.spo2Pct,
                         skinTempDevC = excluded.skinTempDevC,
-                        respRateBpm = excluded.respRateBpm
+                        respRateBpm = excluded.respRateBpm,
+                        sleepScore = excluded.sleepScore,
+                        sleepScoreObjective = excluded.sleepScoreObjective,
+                        sleepScoreBreakdownJSON = excluded.sleepScoreBreakdownJSON
                     """, arguments: [deviceId, d.day, d.totalSleepMin, d.efficiency, d.deepMin,
                                      d.remMin, d.lightMin, d.disturbances, d.restingHr, d.avgHrv,
                                      d.recovery, d.strain, d.exerciseCount,
-                                     d.spo2Pct, d.skinTempDevC, d.respRateBpm])
+                                     d.spo2Pct, d.skinTempDevC, d.respRateBpm,
+                                     d.sleepScore, d.sleepScoreObjective, d.sleepScoreBreakdownJSON])
                 n += db.changesCount
             }
             return n
@@ -153,7 +206,8 @@ extension WhoopStore {
             try Row.fetchAll(db, sql: """
                 SELECT day, totalSleepMin, efficiency, deepMin, remMin, lightMin, disturbances,
                        restingHr, avgHrv, recovery, strain, exerciseCount,
-                       spo2Pct, skinTempDevC, respRateBpm FROM dailyMetric
+                       spo2Pct, skinTempDevC, respRateBpm, sleepScore, sleepScoreObjective,
+                       sleepScoreBreakdownJSON FROM dailyMetric
                 WHERE deviceId = ? AND day >= ? AND day <= ?
                 ORDER BY day ASC
                 """, arguments: [deviceId, from, to])
@@ -165,7 +219,10 @@ extension WhoopStore {
                                 avgHrv: $0["avgHrv"], recovery: $0["recovery"],
                                 strain: $0["strain"], exerciseCount: $0["exerciseCount"],
                                 spo2Pct: $0["spo2Pct"], skinTempDevC: $0["skinTempDevC"],
-                                respRateBpm: $0["respRateBpm"])
+                                respRateBpm: $0["respRateBpm"],
+                                sleepScore: $0["sleepScore"],
+                                sleepScoreObjective: $0["sleepScoreObjective"],
+                                sleepScoreBreakdownJSON: $0["sleepScoreBreakdownJSON"])
                 }
         }
     }

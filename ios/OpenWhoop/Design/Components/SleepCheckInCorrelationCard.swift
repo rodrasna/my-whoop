@@ -7,21 +7,31 @@ import Charts
 struct SleepCheckInCorrelationCard: View {
     @ObservedObject private var store = SleepCheckInStore.shared
 
-    private var entries: [SleepCheckIn] {
-        store.recentEntries(limit: 14).reversed()
+    private enum ChartSeries: String {
+        case feeling = "Sensación"
+        case recovery = "Recovery"
     }
 
     private var chartPoints: [CorrelationPoint] {
-        entries.compactMap { entry in
-            guard let recovery = entry.recoveryPercent else { return nil }
-            guard let date = MetricsRepository.parseLocalDay(entry.dayKey) else { return nil }
-            return CorrelationPoint(
-                id: entry.dayKey,
-                date: date,
-                feeling: entry.feelingScore,
-                recovery: recovery
-            )
-        }
+        store.recentEntries(limit: 14)
+            .compactMap { entry in
+                guard let recovery = entry.recoveryPercent else { return nil }
+                guard let date = MetricsRepository.parseLocalDay(entry.dayKey) else { return nil }
+                return CorrelationPoint(
+                    id: entry.dayKey,
+                    date: date,
+                    feeling: entry.feelingScore,
+                    recovery: recovery
+                )
+            }
+            .sorted { $0.date < $1.date }
+    }
+
+    private var chartXDomain: ClosedRange<Date>? {
+        guard let first = chartPoints.first?.date,
+              let last = chartPoints.last?.date else { return nil }
+        let pad: TimeInterval = 12 * 3600
+        return first.addingTimeInterval(-pad) ... last.addingTimeInterval(pad)
     }
 
     var body: some View {
@@ -62,22 +72,45 @@ struct SleepCheckInCorrelationCard: View {
             ForEach(chartPoints) { pt in
                 LineMark(
                     x: .value("Día", pt.date),
-                    y: .value("Sensación", pt.feeling)
+                    y: .value("Valor", pt.feeling),
+                    series: .value("Métrica", ChartSeries.feeling.rawValue)
                 )
                 .foregroundStyle(WH.Color.sleepPurple)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
-                .interpolationMethod(.catmullRom)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.linear)
 
+                PointMark(
+                    x: .value("Día", pt.date),
+                    y: .value("Valor", pt.feeling)
+                )
+                .foregroundStyle(WH.Color.sleepPurple)
+                .symbolSize(28)
+            }
+            ForEach(chartPoints) { pt in
                 LineMark(
                     x: .value("Día", pt.date),
-                    y: .value("Recovery", pt.recovery)
+                    y: .value("Valor", pt.recovery),
+                    series: .value("Métrica", ChartSeries.recovery.rawValue)
                 )
                 .foregroundStyle(WH.Color.recoveryGreen)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, dash: [4, 3]))
-                .interpolationMethod(.catmullRom)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [5, 4]))
+                .interpolationMethod(.linear)
+
+                PointMark(
+                    x: .value("Día", pt.date),
+                    y: .value("Valor", pt.recovery)
+                )
+                .foregroundStyle(WH.Color.recoveryGreen)
+                .symbolSize(22)
+                .symbol {
+                    Circle()
+                        .strokeBorder(WH.Color.recoveryGreen, lineWidth: 2)
+                        .background(Circle().fill(WH.Color.surface))
+                }
             }
         }
         .chartYScale(domain: 0...100)
+        .chartXScale(domain: chartXDomain ?? Date()...Date())
         .chartYAxis {
             AxisMarks(position: .leading, values: [0, 50, 100]) { value in
                 AxisGridLine().foregroundStyle(WH.Color.separator.opacity(0.4))
@@ -92,6 +125,7 @@ struct SleepCheckInCorrelationCard: View {
         }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: min(5, chartPoints.count))) { value in
+                AxisGridLine().foregroundStyle(WH.Color.separator.opacity(0.2))
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
                         Text(shortDate(date))
@@ -101,7 +135,8 @@ struct SleepCheckInCorrelationCard: View {
                 }
             }
         }
-        .frame(height: 150)
+        .chartLegend(.hidden)
+        .frame(height: 160)
     }
 
     private var legend: some View {

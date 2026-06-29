@@ -299,7 +299,7 @@ struct SleepPerformanceRing: View {
             }
             .frame(maxWidth: .infinity)
 
-            Text("EFICIENCIA DEL SUEÑO")
+            Text("CALIDAD DEL SUEÑO")
                 .font(WH.Font.ringLabel())
                 .foregroundStyle(WH.Color.textSecondary)
                 .tracking(0.8)

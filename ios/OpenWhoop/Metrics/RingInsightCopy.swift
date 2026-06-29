@@ -70,11 +70,7 @@ enum RingInsightCopy {
         daily: DailyMetric?,
         regularityPct: Double?
     ) -> SleepContext? {
-        let effPct: Double? = {
-            if let e = session?.efficiency, e > 0 { return e * 100 }
-            if let e = daily?.efficiency, e > 0 { return e * 100 }
-            return nil
-        }()
+        let effPct = TodayMetricHelpers.sleepScorePercent(daily: daily, sleep: session)
         guard let efficiencyPct = effPct else { return nil }
 
         let totalMin = daily?.totalSleepMin

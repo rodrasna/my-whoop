@@ -40,6 +40,24 @@ final class MobilityTimingTests: XCTestCase {
         XCTAssertEqual(MobilityTiming.guidedDurationSec(for: staticEx, sessionKind: .preWorkout), 40)
     }
 
+    func testBilateralExerciseUsesOneMinutePerSide() {
+        let bilateral = MobilityExercise(
+            id: "pigeon-pose",
+            name: "Paloma",
+            description: "Cambia de lado.",
+            focusAreas: [.hips],
+            sessionKinds: [.daily],
+            pose: .hipRotation,
+            youtubeURL: "https://example.com",
+            durationSec: 60,
+            intensity: .gentle,
+            mobilityMode: .staticHold
+        )
+        XCTAssertTrue(bilateral.isBilateral)
+        XCTAssertEqual(MobilityTiming.guidedDurationSec(for: bilateral, sessionKind: .daily), 120)
+        XCTAssertEqual(MobilityTiming.bilateralSideDurationSec, 60)
+    }
+
     func testDurationLabelFormatting() {
         XCTAssertEqual(MobilityTiming.durationLabel(seconds: 45), "45 s")
         XCTAssertEqual(MobilityTiming.durationLabel(seconds: 60), "1 min")

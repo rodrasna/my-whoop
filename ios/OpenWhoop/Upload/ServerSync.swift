@@ -108,6 +108,14 @@ final class ServerSync {
         return nil
     }
 
+    static func encodeBreakdownJSON(_ value: Any?) -> String? {
+        if let s = value as? String { return s }
+        guard let obj = value else { return nil }
+        guard JSONSerialization.isValidJSONObject(obj),
+              let data = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     // MARK: - Decoded streams
 
     private func pullDecoded() async {
@@ -311,6 +319,11 @@ final class ServerSync {
         await pullDerivedWindow(days: ServerSync.derivedWindowDays)
     }
 
+    /// Fetch daily metrics for an inclusive day range without writing to cache.
+    func fetchDaily(from: String, to: String) async -> [DailyMetric]? {
+        await getDaily(from: from, to: to)
+    }
+
     /// Full-restore variant: pull derived over the wider `fullRestoreWindowDays` window so
     /// multi-year history is rebuilt, not just the recent 60-day incremental window.
     private func pullDerivedFull() async {
@@ -374,7 +387,10 @@ final class ServerSync {
                                exerciseCount: int(r, "exercise_count") ?? int(r, "exerciseCount"),
                                spo2Pct: dbl(r, "spo2_pct") ?? dbl(r, "spo2Pct"),
                                skinTempDevC: dbl(r, "skin_temp_dev_c") ?? dbl(r, "skinTempDevC"),
-                               respRateBpm: dbl(r, "resp_rate_bpm") ?? dbl(r, "respRateBpm"))
+                               respRateBpm: dbl(r, "resp_rate_bpm") ?? dbl(r, "respRateBpm"),
+                               sleepScore: dbl(r, "sleep_score") ?? dbl(r, "sleepScore"),
+                               sleepScoreObjective: dbl(r, "sleep_score_objective") ?? dbl(r, "sleepScoreObjective"),
+                               sleepScoreBreakdownJSON: Self.encodeBreakdownJSON(r["sleep_score_breakdown"]))
         }
     }
 
@@ -551,6 +567,36 @@ final class ServerSync {
             return nil
         }
         return arr.compactMap { Self.parseSleepCheckInRow($0) }
+    }
+
+    /// GET /v1/sleep-insights?device=&days=
+    func getSleepInsights(days: Int = 60) async -> SleepInsightsPayload? {
+        let path = "/v1/sleep-insights?device=\(deviceId)&days=\(days)"
+        guard let data = await get(path: path),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        let ready = obj["ready"] as? Bool ?? false
+        let count = Self.int(obj, "check_in_count") ?? 0
+        let minReq = Self.int(obj, "min_required") ?? 7
+        let message = obj["message"] as? String
+        let top = obj["top_insight"] as? String
+        var items: [SleepInsightsPayload.SleepInsightItem] = []
+        if let arr = obj["insights"] as? [[String: Any]] {
+            for (idx, row) in arr.enumerated() {
+                guard let text = row["text"] as? String else { continue }
+                let kind = row["kind"] as? String ?? "summary"
+                items.append(.init(id: "\(kind)-\(idx)", kind: kind, text: text))
+            }
+        }
+        return SleepInsightsPayload(
+            ready: ready,
+            checkInCount: count,
+            minRequired: minReq,
+            message: message,
+            topInsight: top,
+            insights: items
+        )
     }
 
     /// POST /v1/sleep-check-in — upsert one morning questionnaire row.

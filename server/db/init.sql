@@ -221,6 +221,11 @@ CREATE INDEX IF NOT EXISTS stress_samples_device_ts ON stress_samples (device_id
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS stress_avg  REAL;
 ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS stress_peak REAL;
 
+-- Composite sleep score (objective + optional subjective check-in blend).
+ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS sleep_score           REAL;
+ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS sleep_score_objective REAL;
+ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS sleep_score_breakdown JSONB;
+
 -- Subjective morning sleep check-ins (app questionnaire).
 CREATE TABLE IF NOT EXISTS sleep_check_ins (
     device_id             TEXT NOT NULL,

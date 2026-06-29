@@ -151,8 +151,14 @@ private struct CardPointer: Shape {
 
 enum SleepQualityBuilder {
 
-    /// 0–100: menor variación de hora de acostarse = mayor regularidad.
-    static func regularityScore(from sessions: [CachedSleepSession]) -> Double? {
+    struct RegularityStats {
+        let score: Double
+        let stdDevMinutes: Double
+        let nightCount: Int
+    }
+
+    /// 0–100: menor variación de hora de acostarte = mayor puntuación (estilo WHOOP «sleep consistency»).
+    static func regularityStats(from sessions: [CachedSleepSession]) -> RegularityStats? {
         let nights = sessions.filter { $0.isMainNight }
         let pool = nights.isEmpty ? sessions.filter { !$0.isNap } : nights
         guard pool.count >= 3 else { return nil }
@@ -165,21 +171,142 @@ enum SleepQualityBuilder {
         let mean = minutes.reduce(0, +) / Double(minutes.count)
         let variance = minutes.map { pow($0 - mean, 2) }.reduce(0, +) / Double(minutes.count)
         let stdDev = sqrt(variance)
-        return max(0, min(100, 100 - stdDev * 1.1))
+        let score = max(0, min(100, 100 - stdDev * 1.1))
+        return RegularityStats(score: score, stdDevMinutes: stdDev, nightCount: pool.count)
     }
 
-    static func regularityContext(score: Double, nights: Int) -> String {
-        if nights < 3 {
+    static func regularityScore(from sessions: [CachedSleepSession]) -> Double? {
+        regularityStats(from: sessions)?.score
+    }
+
+    static func regularityContext(stats: RegularityStats) -> String {
+        if stats.nightCount < 3 {
             return "Necesitas al menos 3 noches para medir consistencia"
         }
-        if score < 5 {
+        if stats.score < 5 {
             return "Horarios de acostarte muy distintos entre noches (o sesiones erróneas en el historial)"
         }
         let band: String = {
-            if score >= 85 { return "Horario muy consistente" }
-            if score >= 70 { return "Razonablemente regular" }
+            if stats.score >= 85 { return "Horario muy consistente" }
+            if stats.score >= 70 { return "Razonablemente regular" }
             return "Horario irregular"
         }()
-        return "\(band) · \(nights) noches · \(Int(score.rounded()))% consistencia"
+        let dev = Int(stats.stdDevMinutes.rounded())
+        return "\(band) · \(stats.nightCount) noches · ±\(dev) min de variación al acostarte"
+    }
+
+    static func metricRows(
+        daily: DailyMetric?,
+        weekNights: [CachedSleepSession],
+        subjectiveFeeling: Double? = nil,
+        alignment: String? = nil
+    ) -> [SleepQualityMetricsCard.Row] {
+        guard let daily else { return [] }
+        var rows: [SleepQualityMetricsCard.Row] = []
+        let breakdown = daily.sleepScoreBreakdown
+        let needMin = breakdown?.sleepNeedMin ?? 480
+
+        if let final = daily.sleepScore ?? breakdown?.final {
+            rows.append(.init(
+                id: "final",
+                title: "Calidad del sueño",
+                value: "\(Int(final.rounded()))%",
+                context: breakdown?.provisional == true
+                    ? "Provisional · mejora con más noches"
+                    : "Score compuesto (pulsera + cuestionario)",
+                gaugeValue: final
+            ))
+        }
+
+        let components = breakdown?.components
+        if let qty = components?.quantity {
+            let slept = daily.totalSleepMin ?? 0
+            let needH = needMin / 60
+            let sleptH = slept / 60
+            rows.append(.init(
+                id: "quantity",
+                title: "Cantidad vs. necesidad",
+                value: String(format: "%.1fh / %.1fh", sleptH, needH),
+                context: qty >= 100 ? "Cumples tu necesidad personal" : "Por debajo de tu necesidad habitual",
+                gaugeValue: qty
+            ))
+        } else if let slept = daily.totalSleepMin, slept > 0 {
+            let pct = min(100, slept / needMin * 100)
+            rows.append(.init(
+                id: "hours",
+                title: "Horas vs. lo necesario",
+                value: formatMinutesStatic(slept, needMin: needMin),
+                context: pct >= 100 ? "Cumples el objetivo de sueño" : "Por debajo de tu necesidad",
+                gaugeValue: pct
+            ))
+        }
+
+        if let eff = components?.efficiency ?? daily.efficiency.map({ $0 * 100 }) {
+            rows.append(.init(
+                id: "efficiency",
+                title: "Eficiencia",
+                value: "\(Int(eff.rounded()))%",
+                context: "Tiempo dormido vs. tiempo en cama",
+                gaugeValue: eff
+            ))
+        }
+
+        if let arch = components?.architecture {
+            rows.append(.init(
+                id: "architecture",
+                title: "Calidad arquitectural",
+                value: "\(Int(arch.rounded()))%",
+                context: "Despertares, latencia y balance de fases (estimado)",
+                gaugeValue: arch
+            ))
+        }
+
+        if let cons = components?.consistency {
+            rows.append(.init(
+                id: "regularity",
+                title: "Consistencia horaria",
+                value: "\(Int(cons.rounded()))%",
+                context: "Regularidad de hora de acostarte",
+                gaugeValue: cons
+            ))
+        } else if let stats = regularityStats(from: weekNights) {
+            rows.append(.init(
+                id: "regularity",
+                title: "Consistencia horaria",
+                value: "\(Int(stats.score.rounded()))%",
+                context: regularityContext(stats: stats),
+                gaugeValue: stats.score
+            ))
+        }
+
+        if let feeling = subjectiveFeeling ?? breakdown?.subjective {
+            rows.append(.init(
+                id: "subjective",
+                title: "Tu sensación",
+                value: "\(Int(feeling.rounded()))%",
+                context: alignmentLabel(alignment),
+                gaugeValue: feeling
+            ))
+        }
+
+        return rows
+    }
+
+    private static func formatMinutesStatic(_ minutes: Double, needMin: Double) -> String {
+        func fmt(_ m: Double) -> String {
+            let h = Int(m) / 60
+            let min = Int(m) % 60
+            return min > 0 ? "\(h)h \(min)m" : "\(h)h"
+        }
+        return "\(fmt(minutes)) / \(fmt(needMin))"
+    }
+
+    private static func alignmentLabel(_ alignment: String?) -> String? {
+        switch alignment {
+        case "strap_higher": return "La pulsera dice mejor noche de la que sentiste"
+        case "body_higher": return "Te sientes mejor que lo que marca la pulsera"
+        case "aligned": return "Encaja con las métricas de la pulsera"
+        default: return "Cuestionario matutino"
+        }
     }
 }

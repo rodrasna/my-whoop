@@ -67,6 +67,14 @@ struct SleepCheckInCard: View {
                 existing: entry
             )
         }
+        .onDisappear {
+            voice.cancelRecording()
+        }
+        .onChange(of: voice.phase) { phase in
+            if case .failed(let message) = phase {
+                analyzeError = message
+            }
+        }
     }
 
     private var labelRow: some View {
@@ -219,6 +227,16 @@ struct SleepCheckInCard: View {
 
     private func analysisBlock(_ analysis: SleepCheckInAnalysis) -> some View {
         VStack(alignment: .leading, spacing: WH.Spacing.xs) {
+            if !analysis.sleepQualitySummary.isEmpty {
+                Text(analysis.sleepQualitySummary)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(WH.Color.textSecondary)
+            }
+            if let align = alignmentText(analysis.alignment) {
+                Text(align)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(alignmentColor(analysis.alignment))
+            }
             if !analysis.perceivedCauses.isEmpty {
                 Text(analysis.perceivedCauses.joined(separator: " · "))
                     .font(.system(size: 11, weight: .medium))
@@ -231,6 +249,19 @@ struct SleepCheckInCard: View {
         .padding(WH.Spacing.sm)
         .background(alignmentColor(analysis.alignment).opacity(0.08),
                     in: RoundedRectangle(cornerRadius: WH.Radius.small, style: .continuous))
+    }
+
+    private func alignmentText(_ alignment: String) -> String? {
+        switch alignment {
+        case "strap_higher":
+            return "Pulsera más optimista que tu sensación"
+        case "body_higher":
+            return "Te sientes mejor que marca la pulsera"
+        case "aligned":
+            return "Sensación alineada con la pulsera"
+        default:
+            return nil
+        }
     }
 
     private func alignmentColor(_ alignment: String) -> Color {

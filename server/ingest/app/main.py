@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from . import db, ingest, read, store
 from .analysis import daily
+from .analysis.sleep_insights import build_sleep_insights
 from .analysis import training_coach
 from .analysis import training_coach_explain
 from .analysis.sleep_check_in import analyze_transcript, maybe_refine_with_llm
@@ -404,9 +405,26 @@ def post_sleep_check_in(body: SleepCheckInBody):
     with psycopg.connect(cfg.db_dsn) as conn:
         store.ensure_device(conn, body.device)
         store.upsert_sleep_check_in(conn, body.device, row)
+        score_patch = daily.refresh_sleep_score_for_day(conn, body.device, body.day_key)
         conn.commit()
         rows = read.query_sleep_check_ins(conn, body.device, body.day_key, body.day_key)
-    return rows[0] if rows else row
+    out = rows[0] if rows else row
+    if score_patch:
+        out = dict(out)
+        out["sleep_score_patch"] = score_patch
+    return out
+
+
+@app.get("/v1/sleep-insights", dependencies=[Depends(require_auth)])
+def get_sleep_insights(device: str, days: int = Query(60, ge=7, le=180)):
+    """Personal sleep patterns from check-ins + strap metrics."""
+    end = _dt.date.today()
+    start = end - _dt.timedelta(days=days)
+    with psycopg.connect(cfg.db_dsn) as conn:
+        check_ins = read.query_sleep_check_ins(
+            conn, device, start.isoformat(), end.isoformat())
+        daily_rows = read.query_daily(conn, device, start, end)
+    return build_sleep_insights(check_ins, daily_rows)
 
 
 @app.post("/v1/sleep-check-in/analyze", dependencies=[Depends(require_auth)])

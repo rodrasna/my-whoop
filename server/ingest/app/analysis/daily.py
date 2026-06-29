@@ -74,6 +74,7 @@ from . import strain as _strain
 from . import stress as _stress
 from . import units as _units
 from . import baselines as _baselines
+from . import sleep_score as _sleep_score
 from ._utils import to_epoch
 
 _log = logging.getLogger(__name__)
@@ -104,6 +105,9 @@ _STREAM_LIMIT = 200_000
 #: _STREAM_LIMIT (~2.3 days) is far too small for this window; a dedicated constant
 #: matches the pattern set by _HRMAX_HISTORY_LIMIT and covers the full window.
 _SKIN_TEMP_BASELINE_LIMIT = 3_000_000
+
+_SLEEP_SCORE_HISTORY_DAYS = 30
+_SLEEP_SCORE_BLEND_DAYS = 60
 
 
 def _day_bounds_utc(day: _dt.date) -> tuple[float, float]:
@@ -265,15 +269,15 @@ def _nightly_signals(
     def _in_night(rows: list[dict]) -> list[dict]:
         return [r for r in rows if night_start <= r["ts"] <= night_end]
 
-    # SpO2 — windowed AC/DC ratio over the whole night's red/IR.
+    # SpO2 — median of rolling-window estimates over the night (not one giant window).
     spo2_rows = _in_night(streams.get("spo2") or [])
-    reds = [float(r["red"]) for r in spo2_rows if r.get("red") is not None]
-    irs = [float(r["ir"]) for r in spo2_rows if r.get("ir") is not None]
-    if len(reds) >= 2 and len(reds) == len(irs):
-        try:
-            out["spo2_pct"] = round(_units.spo2_percent_window(reds, irs), 1)
-        except (ZeroDivisionError, ValueError):
-            out["spo2_pct"] = None
+    triples = [
+        (float(r["ts"]), float(r["red"]), float(r["ir"]))
+        for r in spo2_rows
+        if r.get("red") is not None and r.get("ir") is not None
+    ]
+    if len(triples) >= 2:
+        out["spo2_pct"] = _units.nightly_spo2_percent(triples)
 
     # Skin-temp deviation — tonight's mean raw vs trailing baseline raw.
     st_rows = _in_night(streams.get("skin_temp") or [])
@@ -329,6 +333,135 @@ def _exercise_to_dict(e: _exercise.ExerciseSession) -> dict[str, Any]:
         "motion_var": e.motion_var,
         "hr_peaks_per_min": e.hr_peaks_per_min,
     }
+
+
+def _max_sleep_latency_min(sessions: list[_sleep.SleepSession]) -> float:
+    sol = 0.0
+    for s in sessions:
+        m = _sleep.hypnogram_metrics(s)
+        sol = max(sol, float(m["sol_s"]) / 60.0)
+    return sol
+
+
+def _trailing_daily_rows(
+    conn, device_id: str, day: _dt.date, *, days: int, exclude_day: bool = True,
+) -> list[dict[str, Any]]:
+    start = day - _dt.timedelta(days=days)
+    end = day - _dt.timedelta(days=1) if exclude_day else day
+    if end < start:
+        return []
+    return read.query_daily(conn, device_id, start, end)
+
+
+def _blend_history(
+    conn, device_id: str, day: _dt.date,
+) -> list[tuple[float, float]]:
+    start = day - _dt.timedelta(days=_SLEEP_SCORE_BLEND_DAYS)
+    check_ins = read.query_sleep_check_ins(
+        conn, device_id, start.isoformat(), (day - _dt.timedelta(days=1)).isoformat())
+    daily_rows = _trailing_daily_rows(
+        conn, device_id, day, days=_SLEEP_SCORE_BLEND_DAYS, exclude_day=True)
+    by_day = {str(r["day"]): r for r in daily_rows}
+    history: list[tuple[float, float]] = []
+    for ci in check_ins:
+        dk = str(ci["day_key"])
+        feeling = float(ci["morning_feeling"]) * 20.0
+        dr = by_day.get(dk)
+        if not dr:
+            continue
+        obj = dr.get("sleep_score_objective")
+        if obj is None:
+            eff = dr.get("efficiency")
+            obj = float(eff) * 100.0 if eff is not None else None
+        if obj is not None:
+            history.append((feeling, float(obj)))
+    return history
+
+
+def _compute_sleep_score_for_day(
+    conn,
+    device_id: str,
+    day: _dt.date,
+    sleep_summary: dict[str, Any],
+    night_sessions: list[_sleep.SleepSession],
+    *,
+    check_in: dict[str, Any] | None = None,
+) -> _sleep_score.SleepScoreResult:
+    history_rows = _trailing_daily_rows(
+        conn, device_id, day, days=_SLEEP_SCORE_HISTORY_DAYS, exclude_day=True)
+    recent_tst = [
+        float(r["total_sleep_min"]) for r in history_rows
+        if r.get("total_sleep_min") is not None and float(r["total_sleep_min"]) > 0
+    ]
+    bedtimes: list[float] = []
+    for r in history_rows:
+        bt = _sleep_score.bedtime_minute_from_sleep_start(r.get("sleep_start"))
+        if bt is not None:
+            bedtimes.append(bt)
+    if sleep_summary.get("sleep_start") is not None:
+        bt = _sleep_score.bedtime_minute_from_sleep_start(sleep_summary["sleep_start"])
+        if bt is not None:
+            bedtimes.append(bt)
+
+    deep_bl, rem_bl = _sleep_score.stage_baselines_from_history(history_rows)
+    return _sleep_score.compute_sleep_score(
+        total_sleep_min=float(sleep_summary.get("total_sleep_min") or 0),
+        efficiency=sleep_summary.get("efficiency"),
+        disturbances=int(sleep_summary.get("disturbances") or 0),
+        sleep_latency_min=_max_sleep_latency_min(night_sessions),
+        deep_min=float(sleep_summary.get("deep_min") or 0),
+        rem_min=float(sleep_summary.get("rem_min") or 0),
+        light_min=float(sleep_summary.get("light_min") or 0),
+        recent_total_sleep_mins=recent_tst,
+        bedtime_minutes=bedtimes,
+        deep_baseline_pct=deep_bl,
+        rem_baseline_pct=rem_bl,
+        check_in=check_in,
+        blend_history=_blend_history(conn, device_id, day),
+    )
+
+
+def refresh_sleep_score_for_day(conn, device_id: str, day_key: str) -> dict[str, Any] | None:
+    """Recompute sleep score after a check-in upsert (daily row must exist)."""
+    day = _dt.date.fromisoformat(day_key)
+    row = read.query_daily_row(conn, device_id, day)
+    if row is None:
+        return None
+    sleep_summary = {
+        "total_sleep_min": row.get("total_sleep_min"),
+        "efficiency": row.get("efficiency"),
+        "deep_min": row.get("deep_min"),
+        "rem_min": row.get("rem_min"),
+        "light_min": row.get("light_min"),
+        "disturbances": row.get("disturbances"),
+        "sleep_start": row.get("sleep_start"),
+    }
+    sessions_raw = read.query_sleep(conn, device_id, day)
+    night_sessions: list[_sleep.SleepSession] = []
+    for s in sessions_raw:
+        stages = []
+        for seg in s.get("stages") or []:
+            stages.append(_sleep.StageSegment(
+                start=_to_epoch(seg["start"]),
+                end=_to_epoch(seg["end"]),
+                stage=str(seg["stage"])))
+        night_sessions.append(_sleep.SleepSession(
+            start=_to_epoch(s["start_ts"]),
+            end=_to_epoch(s["end_ts"]),
+            efficiency=float(s.get("efficiency") or 0),
+            stages=stages,
+        ))
+    check_ins = read.query_sleep_check_ins(conn, device_id, day_key, day_key)
+    check_in = check_ins[0] if check_ins else None
+    result = _compute_sleep_score_for_day(
+        conn, device_id, day, sleep_summary, night_sessions, check_in=check_in)
+    store.update_daily_sleep_scores(
+        conn, device_id, day,
+        sleep_score=result.sleep_score,
+        sleep_score_objective=result.sleep_score_objective,
+        sleep_score_breakdown=result.breakdown,
+    )
+    return result.as_metrics()
 
 
 def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
@@ -410,6 +543,13 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         if nightly_rmssd is not None and math.isfinite(nightly_rmssd):
             avg_hrv = nightly_rmssd
 
+    # ── Composite sleep score (objective; optional subjective from check-in) ───
+    day_key = day.isoformat()
+    check_ins = read.query_sleep_check_ins(conn, device_id, day_key, day_key)
+    check_in = check_ins[0] if check_ins else None
+    sleep_score_result = _compute_sleep_score_for_day(
+        conn, device_id, day, sleep_summary, night_sessions, check_in=check_in)
+
     # ── Recovery (needs the night's resp, sleep_perf, + a personal baseline) ──
     night_resp = None
     if night_sessions:
@@ -418,8 +558,10 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
     # Build Winsorized-EWMA baselines from the trailing _BASELINE_DAYS of history.
     baselines = _build_baselines(conn, device_id, day)
 
-    # Sleep efficiency (0..1) as the sleep-performance proxy.
-    sleep_perf: float | None = sleep_summary.get("efficiency")
+    # Recovery uses objective sleep score (0..1), not subjective-adjusted final.
+    sleep_perf: float | None = sleep_score_result.sleep_score_objective / 100.0
+    if sleep_perf is None or sleep_perf <= 0:
+        sleep_perf = sleep_summary.get("efficiency")
 
     # Until the personal HRV baseline is fully trusted (≥14 nights), prefer the
     # higher of in-bed session HRV vs tiered nightly RMSSD — last-SWS RMSSD often
@@ -516,6 +658,7 @@ def compute_day(conn, device_id: str, day: _dt.date) -> dict[str, Any]:
         "resp_rate_bpm": signals["resp_rate_bpm"],
         "stress_avg": stress_summary.get("stress_avg"),
         "stress_peak": stress_summary.get("stress_peak"),
+        **sleep_score_result.as_metrics(),
     }
     # Delete the day's existing session rows first, then insert the fresh set, so a
     # recompute yielding FEWER sessions can't leave stale rows (which would desync

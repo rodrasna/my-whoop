@@ -9,30 +9,47 @@ struct OpenWhoopApp: App {
     }
 }
 
-/// Thin root wrapper that creates a MetricsRepository and LiveViewModel synchronously (no
-/// async window) and immediately injects them as environment objects so RootTabView + its
-/// tabs always receive non-nil @EnvironmentObjects from the very first render frame.
-///
-/// LiveViewModel owns the single BLEManager / CBCentralManager. Creating it here (at app
-/// launch) means state-restoration fires in the same process lifetime as the manager, and
-/// both the Device tab and the Alarm sheet share the same BLE connection.
-///
-/// The MetricsRepository opens its on-disk store lazily (on the first load/refresh call),
-/// so there is no need to wait for an async factory before showing the UI.
+/// Gates onboarding, then mounts the main tab shell with env objects.
 private struct AppRoot: View {
-    @StateObject private var metrics = MetricsRepository(deviceId: AppConfig.deviceId)
-    @StateObject private var live    = LiveViewModel(deviceId: AppConfig.deviceId)
+    @StateObject private var serverSettings = ServerConnectionSettings.shared
+    @State private var showMainApp = false
+
+    var body: some View {
+        Group {
+            if serverSettings.needsOnboarding && !showMainApp {
+                ServerOnboardingView(settings: serverSettings) {
+                    showMainApp = true
+                }
+            } else {
+                MainAppShell()
+            }
+        }
+    }
+}
+
+/// Tab shell + BLE/metrics env objects. Created after onboarding so device_id is final.
+private struct MainAppShell: View {
+    @StateObject private var serverSettings = ServerConnectionSettings.shared
+    @StateObject private var metrics: MetricsRepository
+    @StateObject private var live: LiveViewModel
     @StateObject private var tabRouter = RootTabRouter()
     @ObservedObject private var dayPlanStore = WorkoutDayPlanStore.shared
+
+    init() {
+        let settings = ServerConnectionSettings.shared
+        let deviceId = settings.effectiveDeviceId.isEmpty ? "my-whoop" : settings.effectiveDeviceId
+        _metrics = StateObject(wrappedValue: MetricsRepository(settings: settings))
+        _live = StateObject(wrappedValue: LiveViewModel(deviceId: deviceId))
+    }
 
     var body: some View {
         RootTabView()
             .environmentObject(metrics)
             .environmentObject(live)
             .environmentObject(tabRouter)
+            .environmentObject(serverSettings)
             .environmentObject(dayPlanStore)
             .task {
-                // Screenshot seed: only when launched with -demoPreview (e.g. simulator captures).
                 if ProcessInfo.processInfo.arguments.contains("-demoPreview") {
                     await metrics.loadDemoPreview()
                 } else {

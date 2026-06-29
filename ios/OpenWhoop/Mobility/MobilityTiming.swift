@@ -37,8 +37,22 @@ enum MobilityTiming {
         }
     }
 
-    /// Segundos del temporizador para un ejercicio concreto.
+    /// Duración del temporizador por lado en ejercicios bilaterales.
+    static let bilateralSideDurationSec = 60
+
+    /// Segundos totales del temporizador para un ejercicio (ambos lados si es bilateral).
     static func guidedDurationSec(
+        for exercise: MobilityExercise,
+        sessionKind: MobilitySessionKind
+    ) -> Int {
+        if exercise.isBilateral {
+            return bilateralSideDurationSec * 2
+        }
+        return guidedDurationSecUnilateral(for: exercise, sessionKind: sessionKind)
+    }
+
+    /// Segundos del temporizador para un ejercicio unilateral.
+    static func guidedDurationSecUnilateral(
         for exercise: MobilityExercise,
         sessionKind: MobilitySessionKind
     ) -> Int {

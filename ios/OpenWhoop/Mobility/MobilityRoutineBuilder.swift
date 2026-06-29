@@ -476,12 +476,7 @@ enum MobilityRoutineBuilder {
         patterns: Set<MobilityMovementPattern>
     ) -> MobilityRoutine {
         let ordered = orderExercises(exercises, sessionKind: kind)
-        let steps = ordered.map { ex in
-            MobilityRoutineStep(
-                exercise: ex,
-                guidedDurationSec: MobilityTiming.guidedDurationSec(for: ex, sessionKind: kind)
-            )
-        }
+        let steps = ordered.flatMap { routineSteps(for: $0, sessionKind: kind) }
         let totalSec = steps.reduce(0) { $0 + $1.guidedDurationSec }
         let minutes = max(1, Int((Double(totalSec) / 60.0).rounded()))
         return MobilityRoutine(
@@ -491,6 +486,29 @@ enum MobilityRoutineBuilder {
             rationale: rationale,
             focusSummary: focusSummary(areas: focusAreas, patterns: patterns)
         )
+    }
+
+    private static func routineSteps(
+        for exercise: MobilityExercise,
+        sessionKind: MobilitySessionKind
+    ) -> [MobilityRoutineStep] {
+        if exercise.isBilateral {
+            let perSide = MobilityTiming.bilateralSideDurationSec
+            return [
+                MobilityRoutineStep(exercise: exercise, guidedDurationSec: perSide, side: .left),
+                MobilityRoutineStep(exercise: exercise, guidedDurationSec: perSide, side: .right),
+            ]
+        }
+        return [
+            MobilityRoutineStep(
+                exercise: exercise,
+                guidedDurationSec: MobilityTiming.guidedDurationSecUnilateral(
+                    for: exercise,
+                    sessionKind: sessionKind
+                ),
+                side: nil
+            ),
+        ]
     }
 
     /// Orden: activación → dinámico → estático (pre-entreno); estático primero (noche).

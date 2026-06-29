@@ -97,11 +97,14 @@ struct MetricDetailView: View {
     private var stats: Stats? {
         let pts = visiblePoints
         guard !pts.isEmpty else { return nil }
-        let vals = pts.map(\.value)
+        let vals = pts.map(\.value).filter(\.isFinite)
+        guard !vals.isEmpty,
+              let minVal = vals.min(),
+              let maxVal = vals.max() else { return nil }
         return Stats(
             avg:    vals.reduce(0, +) / Double(vals.count),
-            min:    vals.min()!,
-            max:    vals.max()!,
+            min:    minVal,
+            max:    maxVal,
             latest: pts.last?.value
         )
     }

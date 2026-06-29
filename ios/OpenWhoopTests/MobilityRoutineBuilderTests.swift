@@ -129,6 +129,33 @@ final class MobilityRoutineBuilderTests: XCTestCase {
     }
   }
 
+  func testBilateralExerciseExpandsToTwoSteps() {
+    let pigeon = catalog.first { $0.id == "pigeon-pose" }
+    XCTAssertNotNil(pigeon)
+    guard let pigeon else { return }
+
+    let ctx = MobilityRoutineBuilder.Context(
+      dayKey: "2026-06-25",
+      sessionKind: .daily,
+      focusAreas: [.hips],
+      prvnDayType: nil
+    )
+    let routine = MobilityRoutineBuilder.build(
+      catalog: [pigeon],
+      context: ctx
+    )
+    let firstLeft = routine.steps.first { $0.exercise.id == "pigeon-pose" && $0.side == .left }
+    let firstRight = routine.steps.first { $0.exercise.id == "pigeon-pose" && $0.side == .right }
+    XCTAssertNotNil(firstLeft)
+    XCTAssertNotNil(firstRight)
+    XCTAssertEqual(firstLeft?.guidedDurationSec, 60)
+    XCTAssertEqual(firstRight?.guidedDurationSec, 60)
+    if let leftIdx = routine.steps.firstIndex(where: { $0.id == firstLeft?.id }),
+       let rightIdx = routine.steps.firstIndex(where: { $0.id == firstRight?.id }) {
+      XCTAssertEqual(rightIdx, leftIdx + 1)
+    }
+  }
+
   func testDailySessionTargetsFifteenToTwentyMinutes() {
     let ctx = MobilityRoutineBuilder.Context(
       dayKey: "2026-06-18",

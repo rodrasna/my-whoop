@@ -220,7 +220,8 @@ final class ServerSyncTests: XCTestCase {
         let dailyBody = """
         [{"day":"\(today)","total_sleep_min":420.0,"efficiency":0.9,"deep_min":90,"rem_min":110,\
         "light_min":220,"disturbances":3,"resting_hr":53,"avg_hrv":60.0,"recovery":66.0,\
-        "strain":12.3,"exercise_count":1}]
+        "strain":12.3,"exercise_count":1,"sleep_score":78.5,"sleep_score_objective":82.0,\
+        "sleep_score_breakdown":{"objective":82,"final":78.5,"components":{"quantity":90}}}]
         """
         let sleepBody = """
         {"start_ts":"\(isoA)","end_ts":"\(isoB)","efficiency":0.92,"resting_hr":52,"avg_hrv":65.5,\
@@ -245,6 +246,9 @@ final class ServerSyncTests: XCTestCase {
         XCTAssertEqual(days[0].exerciseCount, 1)
         // Server's 0–100 score must be normalized to the app's 0–1 contract.
         XCTAssertEqual(try XCTUnwrap(days[0].recovery), 0.66, accuracy: 1e-6)
+        XCTAssertEqual(try XCTUnwrap(days[0].sleepScore), 78.5, accuracy: 1e-6)
+        XCTAssertNotNil(days[0].sleepScoreBreakdownJSON)
+        XCTAssertEqual(days[0].sleepScoreBreakdown?.objective, 82)
 
         // /v1/sleep is queried per-day over the window; the same body is returned each call, so the
         // single session (natural key startTs=epochA) is upserted once (dedup across days).

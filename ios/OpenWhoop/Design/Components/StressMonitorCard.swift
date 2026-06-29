@@ -33,6 +33,10 @@ struct StressMonitorCard: View {
         }
     }
 
+    private var peakPoint: StressPoint? {
+        scoredPoints.max { ($0.score ?? 0) < ($1.score ?? 0) }
+    }
+
     private var headerRow: some View {
         HStack {
             Text("MONITOR DE ESTRÉS")
@@ -83,19 +87,10 @@ struct StressMonitorCard: View {
     }
 
     private var stressLegend: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Escala 0–3 (solo en reposo)")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(WH.Color.textSecondary)
-            HStack(spacing: WH.Spacing.sm) {
-                legendChip("0–1 bajo", color: WH.Color.stressLow)
-                legendChip("1–2 medio", color: WH.Color.stressMedium)
-                legendChip("2–3 alto", color: WH.Color.stressHigh)
-            }
-            Text("Sube cuando tu VFC baja y la FC sube respecto a tu baseline en momentos de reposo. Entrenos y movimiento no cuentan.")
-                .font(.system(size: 10))
-                .foregroundStyle(WH.Color.textSecondary.opacity(0.9))
-                .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: WH.Spacing.sm) {
+            legendChip("0–1 bajo", color: WH.Color.stressLow)
+            legendChip("1–2 medio", color: WH.Color.stressMedium)
+            legendChip("2–3 alto", color: WH.Color.stressHigh)
         }
         .padding(.top, WH.Spacing.xs)
     }
@@ -118,39 +113,71 @@ struct StressMonitorCard: View {
             return "Baseline en construcción (\(scoredPoints.count) ventanas hoy). "
                 + "Sigue usando la pulsera en reposo; la curva se afina en unos días."
         }
-        if let peak = scoredPoints.max(by: { ($0.score ?? 0) < ($1.score ?? 0) }), let s = peak.score {
+        if let peak = peakPoint, let s = peak.score {
             let t = timeLabel(peak.ts)
             let band = s < 1 ? "bajo" : (s < 2 ? "moderado" : "alto")
-            return "Pico \(band) a las \(t) (\(String(format: "%.1f", s).replacingOccurrences(of: ".", with: ","))). "
-                + "Media del día: \(String(format: "%.1f", averageScore ?? s).replacingOccurrences(of: ".", with: ","))."
+            if let avg = averageScore {
+                return "Pico \(band) a las \(t). Media del día: \(formatScore(avg))."
+            }
+            return "Pico \(band) a las \(t)."
         }
-        return "Curva basada en HRV intradía y FC. Los entrenos y el movimiento no cuentan como estrés."
+        return "Curva de reposo (HRV + FC vs tu baseline). Entrenos y movimiento no cuentan."
+    }
+
+    private func formatScore(_ value: Double) -> String {
+        String(format: "%.1f", value).replacingOccurrences(of: ".", with: ",")
     }
 
     @ViewBuilder
     private var chartContent: some View {
         if scoredPoints.count >= 2, let domain = dayDomain {
-            Chart(scoredPoints) { p in
-                if let score = p.score {
-                    LineMark(
-                        x: .value("Hora", Date(timeIntervalSince1970: TimeInterval(p.ts))),
-                        y: .value("Estrés", score)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(WH.Color.stressMedium)
-                    PointMark(
-                        x: .value("Hora", Date(timeIntervalSince1970: TimeInterval(p.ts))),
-                        y: .value("Estrés", score)
-                    )
-                    .foregroundStyle(WH.Color.stressHigh)
+            Chart {
+                ForEach(scoredPoints) { p in
+                    if let score = p.score {
+                        let when = Date(timeIntervalSince1970: TimeInterval(p.ts))
+                        AreaMark(
+                            x: .value("Hora", when),
+                            y: .value("Estrés", score)
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    WH.Color.textPrimary.opacity(0.22),
+                                    WH.Color.textPrimary.opacity(0.02),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.catmullRom)
+
+                        LineMark(
+                            x: .value("Hora", when),
+                            y: .value("Estrés", score)
+                        )
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(WH.Color.textPrimary.opacity(0.92))
+                        .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    }
                 }
             }
             .chartYScale(domain: 0...3)
             .chartXScale(domain: domain)
             .chartYAxis(.hidden)
-            .chartXAxis(.hidden)
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            Text(hourLabel(date))
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
+                        }
+                    }
+                }
+            }
             .padding(.horizontal, WH.Spacing.sm)
-            .padding(.vertical, WH.Spacing.xs)
+            .padding(.top, WH.Spacing.xs)
+            .padding(.bottom, 2)
         } else {
             VStack {
                 Spacer()
@@ -183,6 +210,12 @@ struct StressMonitorCard: View {
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm"
         return fmt.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+    }
+
+    private func hourLabel(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "H"
+        return fmt.string(from: date) + "h"
     }
 
     private var stressZoneBands: some View {

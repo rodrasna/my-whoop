@@ -12,6 +12,15 @@ final class MobilityCatalogLoaderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(catalog.exercises.count, 25)
     }
 
+    func testExerciseImagesLoadFromAppBundle() throws {
+        let catalog = try MobilityCatalogLoader.load(bundle: .main)
+        let missing = catalog.exercises.filter { MobilityExerciseImageLoader.bundleImage(for: $0) == nil }
+        XCTAssertTrue(
+            missing.isEmpty,
+            "Missing bundle images for: \(missing.map(\.id).joined(separator: ", "))"
+        )
+    }
+
     func testCatalogUniqueIdsAndRequiredFields() throws {
         let catalog = try MobilityCatalogLoader.load(bundle: .main)
         let ids = catalog.exercises.map(\.id)

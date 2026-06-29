@@ -303,7 +303,8 @@ def query_profile(conn, device_id: str) -> dict | None:
 _DAILY_COLS = ["device_id", "day", "total_sleep_min", "efficiency", "deep_min",
                "rem_min", "light_min", "disturbances", "resting_hr", "avg_hrv",
                "recovery", "strain", "exercise_count", "sleep_start", "sleep_end",
-               "spo2_pct", "skin_temp_dev_c", "resp_rate_bpm", "computed_at"]
+               "spo2_pct", "skin_temp_dev_c", "resp_rate_bpm", "computed_at",
+               "sleep_score", "sleep_score_objective", "sleep_score_breakdown"]
 
 
 def query_daily(conn, device_id, start_date, end_date):
@@ -314,7 +315,32 @@ def query_daily(conn, device_id, start_date, end_date):
         "WHERE device_id = %s AND day >= %s AND day <= %s ORDER BY day",
         (device_id, start_date, end_date),
     ).fetchall()
-    return [dict(zip(_DAILY_COLS, r)) for r in rows]
+    out = []
+    for r in rows:
+        row = dict(zip(_DAILY_COLS, r))
+        row["sleep_score_breakdown"] = _parse_breakdown(row.get("sleep_score_breakdown"))
+        out.append(row)
+    return out
+
+
+def _parse_breakdown(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def query_daily_row(conn, device_id, day):
+    """Single daily_metrics row for (device_id, day), or None."""
+    rows = query_daily(conn, device_id, day, day)
+    if not rows:
+        return None
+    row = rows[0]
+    row["sleep_score_breakdown"] = _parse_breakdown(row.get("sleep_score_breakdown"))
+    return row
 
 
 def query_sleep(conn, device_id, day):

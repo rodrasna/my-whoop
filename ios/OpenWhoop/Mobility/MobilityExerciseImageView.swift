@@ -38,22 +38,27 @@ struct MobilityExerciseImageView: View {
 
 enum MobilityExerciseImageLoader {
 
-    private static let subdirectory = "ExerciseImages"
+    private static let subdirectories = [
+        "ExerciseImages",
+        "Mobility/ExerciseImages",
+        nil as String?,
+    ]
 
     static func bundleImage(for exercise: MobilityExercise) -> UIImage? {
         if let asset = exercise.imageAsset?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
             if let img = UIImage(named: asset) { return img }
-            if let url = Bundle.main.url(forResource: asset, withExtension: "jpg", subdirectory: subdirectory),
+            if let img = loadJPG(named: asset) { return img }
+        }
+        return loadJPG(named: exercise.id)
+    }
+
+    private static func loadJPG(named name: String) -> UIImage? {
+        for subdirectory in subdirectories {
+            if let url = Bundle.main.url(forResource: name, withExtension: "jpg", subdirectory: subdirectory),
                let data = try? Data(contentsOf: url),
                let img = UIImage(data: data) {
                 return img
             }
-        }
-        let id = exercise.id
-        if let url = Bundle.main.url(forResource: id, withExtension: "jpg", subdirectory: subdirectory),
-           let data = try? Data(contentsOf: url),
-           let img = UIImage(data: data) {
-            return img
         }
         return nil
     }

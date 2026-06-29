@@ -15,7 +15,7 @@ struct MobilityExerciseCard: View {
                     Text("\(index).")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(WH.Color.textSecondary)
-                    Text(step.exercise.name)
+                    Text(step.displayTitle)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(WH.Color.textPrimary)
                 }

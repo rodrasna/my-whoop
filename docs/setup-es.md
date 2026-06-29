@@ -342,3 +342,9 @@ Durante tus 2 meses de trial oficial, puedes comparar:
 - **SpO₂ / temperatura de piel**: no disponibles por BLE local (WHOOP los calcula en su nube)
 
 No esperes paridad 1:1; el objetivo es **propiedad de tus datos** y recolección local continua.
+
+---
+
+## TestFlight + servidor remoto (varias personas)
+
+Guía operativa: [testflight-remote-server.md](testflight-remote-server.md)

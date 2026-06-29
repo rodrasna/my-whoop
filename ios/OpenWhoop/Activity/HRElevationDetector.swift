@@ -7,13 +7,18 @@ import Foundation
 
 enum HRElevationDetector {
 
-  private static let minDurationS = 120.0
-  private static let marginBpm = 10.0
-  private static let peakMin = 115
+  private static let minDurationS = 180.0
+  private static let marginBpm = 15.0
+  private static let peakMin = 125
   private static let mergeGapS = 90.0
   private static let overlapFrac = 0.35
-  /// Subidas FC >2h suelen ser ruido diario, no un entreno discreto.
+  /// Subidas FC >2h se subdividen en segmentos (picos / valles) en lugar de descartarse.
   private static let maxDurationS = 120.0 * 60.0
+  private static let subdividePeakMin = 130
+  private static let subdividePeakGapS = 20.0 * 60.0
+  private static let subdividePeakHalfWindowS = 25.0 * 60.0
+  private static let subdivideValleyGapS = 10.0 * 60.0
+  private static let subdivideValleyMarginBpm = 5.0
 
   static func detect(
     points: [TrendPoint],
@@ -48,41 +53,152 @@ enum HRElevationDetector {
     }
     runs.append((runStart, prev))
 
-    return runs.compactMap { run in
-      let window = elevated.filter { $0.ts >= run.start && $0.ts <= run.end }
-      guard !window.isEmpty else { return nil }
-      let peak = window.map(\.bpm).max() ?? 0
-      // Con FC muestreada del servidor, el span entre puntos subestima la duración real.
+    return runs.flatMap { run -> [Workout] in
       let span = Double(run.end - run.start) + interval
-      guard span <= maxDurationS else { return nil }
-      guard peak >= peakMin else { return nil }
-      guard span >= minDurationS || (peak >= 140 && span >= 45) || (peak >= 150 && window.count >= 2) else {
-        return nil
+      let subRuns: [(start: Int, end: Int)]
+      if span > maxDurationS {
+        subRuns = subdivideLongRun(
+          run,
+          elevated: elevated,
+          floor: floor,
+          interval: interval
+        )
+      } else {
+        subRuns = [run]
       }
+      return subRuns.compactMap { sub in
+        makeWorkout(
+          sub,
+          elevated: elevated,
+          interval: interval,
+          deviceId: deviceId,
+          suffix: span > maxDurationS ? "sub" : "hr"
+        )
+      }
+    }
+  }
 
-      let avg = Double(window.map(\.bpm).reduce(0, +)) / Double(window.count)
-      let startTs = run.start
-      let endTs = run.end + Int(interval.rounded())
-      return Workout(
-        id: "\(deviceId)|hr|\(startTs)",
-        deviceId: deviceId,
-        startTs: startTs,
-        endTs: endTs,
-        avgHr: avg,
-        peakHr: peak,
-        strain: nil,
-        kind: "hr_elevation",
-        durationS: max(1, endTs - startTs),
-        zoneTimePct: [:],
-        avgHrrPct: nil,
-        hrmax: nil,
-        hrmaxSource: "",
-        caloriesKcal: nil,
-        caloriesKj: nil,
-        motionVar: nil,
-        hrPeaksPerMin: nil
+  private static func subdivideLongRun(
+    _ run: (start: Int, end: Int),
+    elevated: [(ts: Int, bpm: Int)],
+    floor: Double,
+    interval: Double
+  ) -> [(start: Int, end: Int)] {
+    let window = elevated.filter { $0.ts >= run.start && $0.ts <= run.end }
+    let peakSegments = hrPeakSegments(in: window, run: run)
+    if peakSegments.count >= 2 { return peakSegments }
+
+    let valleySplits = hrValleySplitPoints(in: window, floor: floor)
+    if !valleySplits.isEmpty {
+      return segmentsFromSplits(run.start, run.end, valleySplits)
+    }
+    return forceSplit(run.start, run.end)
+  }
+
+  private static func hrPeakSegments(
+    in window: [(ts: Int, bpm: Int)],
+    run: (start: Int, end: Int)
+  ) -> [(start: Int, end: Int)] {
+    guard window.count >= 5 else { return [] }
+    var peakTs: [Int] = []
+    for i in 2..<(window.count - 2) {
+      let bpm = window[i].bpm
+      guard bpm >= subdividePeakMin else { continue }
+      if bpm >= window[i - 1].bpm && bpm >= window[i + 1].bpm
+          && bpm >= window[i - 2].bpm && bpm >= window[i + 2].bpm {
+        if let last = peakTs.last, window[i].ts - last < Int(subdividePeakGapS) { continue }
+        peakTs.append(window[i].ts)
+      }
+    }
+    return peakTs.map { peak in
+      (
+        start: max(run.start, peak - Int(subdividePeakHalfWindowS)),
+        end: min(run.end, peak + Int(subdividePeakHalfWindowS))
       )
     }
+  }
+
+  private static func hrValleySplitPoints(
+    in window: [(ts: Int, bpm: Int)],
+    floor: Double
+  ) -> [Int] {
+    let valleyFloor = floor - subdivideValleyMarginBpm
+    var splits: [Int] = []
+    var valleyStart: Int?
+    for sample in window {
+      if Double(sample.bpm) < valleyFloor {
+        if valleyStart == nil { valleyStart = sample.ts }
+      } else if let start = valleyStart {
+        if Double(sample.ts - start) >= subdivideValleyGapS {
+          splits.append((start + sample.ts) / 2)
+        }
+        valleyStart = nil
+      }
+    }
+    return splits
+  }
+
+  private static func segmentsFromSplits(
+    _ start: Int,
+    _ end: Int,
+    _ splits: [Int]
+  ) -> [(start: Int, end: Int)] {
+    let bounds = [start] + splits.filter { $0 > start && $0 < end }.sorted() + [end]
+    return zip(bounds, bounds.dropFirst()).map { ($0, $1) }
+  }
+
+  private static func forceSplit(_ start: Int, _ end: Int) -> [(start: Int, end: Int)] {
+    let chunk = Int(maxDurationS)
+    var segments: [(start: Int, end: Int)] = []
+    var cursor = start
+    while cursor < end {
+      let chunkEnd = min(end, cursor + chunk)
+      if chunkEnd - cursor < Int(minDurationS) { break }
+      segments.append((cursor, chunkEnd))
+      cursor = chunkEnd
+    }
+    return segments
+  }
+
+  private static func makeWorkout(
+    _ run: (start: Int, end: Int),
+    elevated: [(ts: Int, bpm: Int)],
+    interval: Double,
+    deviceId: String,
+    suffix: String
+  ) -> Workout? {
+    let window = elevated.filter { $0.ts >= run.start && $0.ts <= run.end }
+    guard !window.isEmpty else { return nil }
+    let peak = window.map(\.bpm).max() ?? 0
+    let span = Double(run.end - run.start) + interval
+    guard span <= maxDurationS else { return nil }
+    guard peak >= peakMin else { return nil }
+    guard span >= minDurationS || (peak >= 140 && span >= 45) || (peak >= 150 && window.count >= 2) else {
+      return nil
+    }
+
+    let avg = Double(window.map(\.bpm).reduce(0, +)) / Double(window.count)
+    let startTs = run.start
+    let endTs = run.end + Int(interval.rounded())
+    return Workout(
+      id: "\(deviceId)|\(suffix)|\(startTs)",
+      deviceId: deviceId,
+      startTs: startTs,
+      endTs: endTs,
+      avgHr: avg,
+      peakHr: peak,
+      strain: nil,
+      kind: "hr_elevation",
+      durationS: max(1, endTs - startTs),
+      zoneTimePct: [:],
+      avgHrrPct: nil,
+      hrmax: nil,
+      hrmaxSource: "",
+      caloriesKcal: nil,
+      caloriesKj: nil,
+      motionVar: nil,
+      hrPeaksPerMin: nil
+    )
   }
 
   /// Picos locales pronunciados (despertar ~7:00) que no forman un tramo sostenido en datos muestreados.
@@ -97,7 +213,7 @@ enum HRElevationDetector {
 
     let interval = medianSampleInterval(sorted)
     let resting = Double(restingHr ?? estimateRestingHr(sorted))
-    let floor = resting + 8
+    let floor = resting + 15
     let halfWindow = Int(max(interval * 4, 240).rounded())
 
     var peaks: [(ts: Int, bpm: Int)] = []
@@ -106,7 +222,7 @@ enum HRElevationDetector {
       let cur = Int(sorted[i].value.rounded())
       let next = Int(sorted[i + 1].value.rounded())
       guard cur >= prev, cur >= next else { continue }
-      guard Double(cur) > floor, cur >= 120 else { continue }
+      guard Double(cur) > floor, cur >= 130 else { continue }
       peaks.append((Int(sorted[i].date.timeIntervalSince1970), cur))
     }
 
@@ -173,7 +289,7 @@ enum HRElevationDetector {
     let resting = Double(restingHr ?? estimateRestingHr(points))
     guard let peakPoint = morning.max(by: { $0.value < $1.value }) else { return [] }
     let peak = Int(peakPoint.value.rounded())
-    guard peak >= max(100, Int(resting) + 20) else { return [] }
+    guard peak >= max(115, Int(resting) + 30) else { return [] }
 
     let peakTs = Int(peakPoint.date.timeIntervalSince1970)
     let interval = medianSampleInterval(morning)

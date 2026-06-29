@@ -24,11 +24,20 @@ final class MetricsRepository: ObservableObject {
     @Published private(set) var lastPRVNSyncError: String?
     @Published private(set) var lastRefreshedAt: Date?
     @Published private(set) var isDemoPreviewActive = false
+    @Published private(set) var sleepInsights: SleepInsightsPayload?
 
     // Injected directly (test path): store + sync are ready immediately; skip ensureOpen.
     private var store: WhoopStore?
     private var serverSync: ServerSync?
-    private let deviceId: String
+    private let settings: ServerConnectionSettings
+    /// When set (test injection), ignores settings.effectiveDeviceId.
+    private let pinnedDeviceId: String?
+
+    private var deviceId: String {
+        if let pinnedDeviceId { return pinnedDeviceId }
+        let effective = settings.effectiveDeviceId
+        return effective.isEmpty ? "my-whoop" : effective
+    }
 
     // Lazy-open state (app path).
     private var _alreadyOpen = false
@@ -39,22 +48,25 @@ final class MetricsRepository: ObservableObject {
     /// Creates a repository without opening the on-disk store. The store is opened lazily on the
     /// first async call to load()/refresh()/daily()/sleepSessions(). AppRoot uses this init so it
     /// can always provide a non-nil MetricsRepository env object from the very first frame.
-    init(deviceId: String = "my-whoop") {
-        self.deviceId = deviceId
+    init(deviceId: String = "my-whoop", settings: ServerConnectionSettings? = nil) {
+        self.settings = settings ?? ServerConnectionSettings.shared
+        self.pinnedDeviceId = nil
         self.store = nil
         self.serverSync = nil
         self._alreadyOpen = false
         self.isDemoPreviewActive = UserDefaults.standard.bool(forKey: DemoDataLoader.activeKey)
+        _ = deviceId // legacy; app path uses settings.effectiveDeviceId
     }
 
     // MARK: - Designated init (test path — store + sync injected)
 
     /// Designated initializer for tests: store and sync are ready immediately; ensureOpen() is
     /// a no-op. Keeps all existing MetricsRepository tests passing without modification.
-    init(store: WhoopStore, serverSync: ServerSync?, deviceId: String) {
+    init(store: WhoopStore, serverSync: ServerSync?, deviceId: String, settings: ServerConnectionSettings? = nil) {
         self.store = store
         self.serverSync = serverSync
-        self.deviceId = deviceId
+        self.settings = settings ?? ServerConnectionSettings.shared
+        self.pinnedDeviceId = deviceId
         self._alreadyOpen = true   // already wired — no lazy open needed
     }
 
@@ -80,7 +92,7 @@ final class MetricsRepository: ObservableObject {
                 return
             }
             store = openedStore
-            serverSync = AppConfig.uploaderConfig(deviceId: deviceId)
+            serverSync = settings.uploaderConfig()
                 .map { ServerSync(config: $0, store: openedStore, deviceId: deviceId) }
             _alreadyOpen = true
         }
@@ -95,15 +107,22 @@ final class MetricsRepository: ObservableObject {
     static func makeDefault(deviceId: String = "my-whoop") async -> MetricsRepository? {
         guard let path = try? StorePaths.defaultDatabasePath(),
               let store = try? await WhoopStore(path: path) else { return nil }
-        let sync = AppConfig.uploaderConfig(deviceId: deviceId)
-            .map { ServerSync(config: $0, store: store, deviceId: deviceId) }
-        return MetricsRepository(store: store, serverSync: sync, deviceId: deviceId)
+        let sync = ServerConnectionSettings.shared.uploaderConfig()
+            .map { ServerSync(config: $0, store: store, deviceId: ServerConnectionSettings.shared.effectiveDeviceId) }
+        return MetricsRepository(store: store, serverSync: sync, deviceId: ServerConnectionSettings.shared.effectiveDeviceId)
     }
 
-    /// True when a server is configured (WHOOP_BASE_URL + API key set in Secrets.xcconfig).
-    /// Lets the empty states distinguish "no server configured" from "configured, no data yet".
+    /// True when a server URL + API key are available (build defaults or user overrides).
     var isServerConfigured: Bool {
-        serverSync != nil || AppConfig.uploaderConfig(deviceId: deviceId) != nil
+        serverSync != nil || settings.isServerConfigured
+    }
+
+    /// Rebuild ServerSync after the user changes connection settings in Ajustes.
+    func reloadServerConnection() async {
+        await ensureOpen()
+        guard let store else { return }
+        serverSync = settings.uploaderConfig()
+            .map { ServerSync(config: $0, store: store, deviceId: deviceId) }
     }
 
     // MARK: - Load from cache (no network)
@@ -165,6 +184,7 @@ final class MetricsRepository: ObservableObject {
             await loadPRVNProgramFromServerIfNeeded()
             await syncSleepCheckIns()
             await syncCoachContext()
+            await fetchSleepInsights()
         }
 
         // Morning recovery notification: fire once per calendar day when recovery is available.
@@ -331,6 +351,22 @@ final class MetricsRepository: ObservableObject {
     func pushSleepCheckIn(_ checkIn: SleepCheckIn) async {
         await ensureOpen()
         _ = await serverSync?.putSleepCheckIn(checkIn)
+        await refreshDaily(dayKey: checkIn.dayKey)
+    }
+
+    /// Pull one day of daily metrics after check-in updates sleep score on server.
+    func refreshDaily(dayKey: String) async {
+        await ensureOpen()
+        guard let store, let serverSync else { return }
+        if let days = await serverSync.fetchDaily(from: dayKey, to: dayKey), !days.isEmpty {
+            try? await store.upsertDailyMetrics(days, deviceId: deviceId)
+            await load()
+        }
+    }
+
+    func fetchSleepInsights() async {
+        await ensureOpen()
+        sleepInsights = await serverSync?.getSleepInsights(days: 60)
     }
 
     /// Push manual workout day plan to server for coach context. Best-effort.
@@ -577,6 +613,15 @@ final class MetricsRepository: ObservableObject {
             return DemoDataLoader.demoWorkouts(deviceId: deviceId)
         }
         return await serverSync?.getWorkouts(from: from, to: to) ?? []
+    }
+
+    /// Workouts whose ``startTs`` falls in [fromEpoch, toEpoch) — local-day windows.
+    func workouts(fromEpoch: Int, toEpoch: Int) async -> [Workout] {
+        await ensureOpen()
+        if isDemoPreviewActive {
+            return DemoDataLoader.demoWorkouts(deviceId: deviceId)
+        }
+        return await serverSync?.getWorkouts(fromEpoch: fromEpoch, toEpoch: toEpoch) ?? []
     }
 
     /// Ventanas de estrés intradía (servidor) para un día calendario local.

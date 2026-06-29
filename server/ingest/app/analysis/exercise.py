@@ -183,9 +183,22 @@ HR_ELEVATION_MARGIN_BPM: float = 10.0
 HR_ELEVATION_PEAK_MIN: int = 115
 HR_ELEVATION_MERGE_GAP_S: float = 90.0
 HR_ELEVATION_OVERLAP_FRAC: float = 0.35
-# HR-only bouts longer than this are usually all-day elevated FC (stress, heat, walking
-# around) rather than a discrete session — cap to avoid 3h+ false positives.
+# HR-only bouts longer than this are subdivided into shorter segments (motion/HR peaks)
+# instead of being discarded.  Keeps all-day elevated FC from becoming one false workout
+# while still registering real training inside a long afternoon window.
 MAX_HR_ELEVATION_DURATION_MIN: float = 120.0
+
+#: Motion below this (g/s, smoothed) for ``SUBDIVIDE_REST_GAP_S`` → split a long block.
+SUBDIVIDE_REST_MOTION: float = 0.08
+#: Continuous low-motion rest long enough to split a multi-hour elevated-HR window.
+SUBDIVIDE_REST_GAP_S: float = 8 * 60.0
+#: Looser motion gate when carving segments inside a long elevated-HR block (lifting,
+# transitions).  Still above desk/fidget noise.
+SUBDIVIDE_MOTION_THRESHOLD: float = 0.12
+#: HR local-maxima must be at least this far apart (seconds) to start separate segments.
+SUBDIVIDE_HR_PEAK_GAP_S: float = 20 * 60.0
+#: Half-width (seconds) around an HR peak when building a still-wrist segment.
+SUBDIVIDE_HR_PEAK_HALF_WINDOW_S: float = 25 * 60.0
 
 #: Nearest-ts alignment tolerance (seconds) when binding HR to gravity (and
 #: vice-versa). At 1 Hz, samples within this are treated as coincident. 5 s
@@ -606,6 +619,256 @@ def detect_exercises(
     return sessions
 
 
+def _merge_timestamp_runs(timestamps: Sequence[float], merge_gap_s: float) -> list[tuple[float, float]]:
+    """Group sorted timestamps into [start, end] runs, bridging gaps < ``merge_gap_s``."""
+    if not timestamps:
+        return []
+    runs: list[tuple[float, float]] = []
+    run_start = timestamps[0]
+    prev = timestamps[0]
+    for ts in timestamps[1:]:
+        if ts - prev > merge_gap_s:
+            runs.append((run_start, prev))
+            run_start = ts
+        prev = ts
+    runs.append((run_start, prev))
+    return runs
+
+
+def _motion_segments_in_window(
+    start: float,
+    end: float,
+    motion: Sequence[dict],
+    hr_seg: Sequence[tuple[float, float]],
+    hr_floor: float,
+    *,
+    motion_threshold: float = SUBDIVIDE_MOTION_THRESHOLD,
+    merge_gap_s: float = MERGE_GAP_S,
+    min_dur_s: float = MIN_HR_ELEVATION_MIN * 60.0,
+) -> list[tuple[float, float]]:
+    """High-motion sub-windows inside a long elevated-HR block."""
+    window_motion = [p for p in motion if start <= p["ts"] <= end]
+    if not window_motion:
+        return []
+
+    smooth = _smoothed_intensity(window_motion, MOTION_SMOOTH_S)
+    hr_ts = [t for t, _ in hr_seg]
+    hr_bpm = [v for _, v in hr_seg]
+
+    active_ts: list[float] = []
+    for point, inten in zip(window_motion, smooth):
+        if inten <= motion_threshold:
+            continue
+        bpm = _nearest(hr_ts, hr_bpm, point["ts"], ALIGN_TOLERANCE_S)
+        if bpm is not None and bpm > hr_floor:
+            active_ts.append(point["ts"])
+
+    segments: list[tuple[float, float]] = []
+    for seg_start, seg_end in _merge_timestamp_runs(active_ts, merge_gap_s):
+        if seg_end - seg_start < min_dur_s:
+            continue
+        window = [(t, v) for t, v in hr_seg if seg_start <= t <= seg_end]
+        if not window:
+            continue
+        if max(v for _, v in window) < HR_ELEVATION_PEAK_MIN:
+            continue
+        segments.append((seg_start, seg_end))
+    return segments
+
+
+def _hr_peak_segments_in_window(
+    start: float,
+    end: float,
+    hr_seg: Sequence[tuple[float, float]],
+    hr_floor: float,
+    *,
+    min_peak: int = 130,
+    min_dur_s: float = MIN_HR_ELEVATION_MIN * 60.0,
+) -> list[tuple[float, float]]:
+    """Segments around pronounced HR peaks — for still-wrist strength / intervals."""
+    window = [(t, v) for t, v in hr_seg if start <= t <= end]
+    if len(window) < 5:
+        return []
+
+    peak_ts: list[float] = []
+    for i in range(2, len(window) - 2):
+        _, bpm = window[i]
+        if bpm < min_peak:
+            continue
+        prev2, prev1 = window[i - 2][1], window[i - 1][1]
+        next1, next2 = window[i + 1][1], window[i + 2][1]
+        if bpm >= prev1 and bpm >= next1 and bpm >= prev2 and bpm >= next2:
+            if peak_ts and window[i][0] - peak_ts[-1] < SUBDIVIDE_HR_PEAK_GAP_S:
+                continue
+            peak_ts.append(window[i][0])
+
+    segments: list[tuple[float, float]] = []
+    max_seg_s = MAX_HR_ELEVATION_DURATION_MIN * 60.0
+    for peak in peak_ts:
+        seg_start = max(start, peak - SUBDIVIDE_HR_PEAK_HALF_WINDOW_S)
+        seg_end = min(end, peak + SUBDIVIDE_HR_PEAK_HALF_WINDOW_S)
+        if seg_end - seg_start < min_dur_s:
+            continue
+        bpms = [v for t, v in window if seg_start <= t <= seg_end]
+        if not bpms or max(bpms) < HR_ELEVATION_PEAK_MIN:
+            continue
+        if bpms and statistics.fmean(bpms) <= hr_floor:
+            continue
+        if seg_end - seg_start > max_seg_s:
+            seg_end = seg_start + max_seg_s
+        segments.append((seg_start, seg_end))
+    return segments
+
+
+def _rest_valley_split_points(
+    start: float,
+    end: float,
+    motion: Sequence[dict],
+) -> list[float]:
+    """Timestamps (mid-rest) where a long low-motion valley splits a block."""
+    window_motion = [p for p in motion if start <= p["ts"] <= end]
+    if not window_motion:
+        return []
+
+    smooth = _smoothed_intensity(window_motion, MOTION_SMOOTH_S)
+    split_points: list[float] = []
+    rest_start: float | None = None
+    for point, inten in zip(window_motion, smooth):
+        if inten < SUBDIVIDE_REST_MOTION:
+            if rest_start is None:
+                rest_start = point["ts"]
+            continue
+        if rest_start is not None and point["ts"] - rest_start >= SUBDIVIDE_REST_GAP_S:
+            split_points.append((rest_start + point["ts"]) / 2.0)
+        rest_start = None
+
+    if rest_start is not None and end - rest_start >= SUBDIVIDE_REST_GAP_S:
+        split_points.append((rest_start + end) / 2.0)
+    return split_points
+
+
+def _segments_from_split_points(
+    start: float,
+    end: float,
+    split_points: Sequence[float],
+) -> list[tuple[float, float]]:
+    bounds = [start, *sorted(p for p in split_points if start < p < end), end]
+    return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+
+def _force_split_long_run(
+    start: float,
+    end: float,
+    motion: Sequence[dict],
+    max_seg_s: float,
+) -> list[tuple[float, float]]:
+    """Last resort: chunk a block at the lowest-motion point in each window."""
+    segments: list[tuple[float, float]] = []
+    cursor = start
+    window_motion = [p for p in motion if start <= p["ts"] <= end]
+    while cursor < end:
+        chunk_end = min(end, cursor + max_seg_s)
+        if chunk_end - cursor < MIN_HR_ELEVATION_MIN * 60.0:
+            break
+        if chunk_end >= end:
+            segments.append((cursor, end))
+            break
+        # Split early at the calmest minute inside the chunk tail.
+        search_from = chunk_end - 20 * 60.0
+        best_ts = chunk_end
+        best_inten = math.inf
+        if window_motion:
+            smooth = _smoothed_intensity(window_motion, MOTION_SMOOTH_S)
+            for point, inten in zip(window_motion, smooth):
+                if search_from <= point["ts"] <= chunk_end and inten < best_inten:
+                    best_inten = inten
+                    best_ts = point["ts"]
+        segments.append((cursor, best_ts))
+        cursor = best_ts
+    return segments
+
+
+def _subdivide_long_hr_run(
+    start: float,
+    end: float,
+    hr_seg: Sequence[tuple[float, float]],
+    motion: Sequence[dict],
+    hr_floor: float,
+) -> list[tuple[float, float]]:
+    """Turn an over-long elevated-HR window into registrable activity segments."""
+    for finder in (
+        lambda: _motion_segments_in_window(start, end, motion, hr_seg, hr_floor),
+        lambda: _hr_peak_segments_in_window(start, end, hr_seg, hr_floor),
+    ):
+        segments = finder()
+        if segments:
+            return segments
+
+    split_points = _rest_valley_split_points(start, end, motion)
+    if split_points:
+        return _segments_from_split_points(start, end, split_points)
+
+    return _force_split_long_run(start, end, motion, MAX_HR_ELEVATION_DURATION_MIN * 60.0)
+
+
+def _make_hr_elevation_session(
+  start: float,
+  end: float,
+  hr_seg: Sequence[tuple[float, float]],
+  *,
+  resting_hr: float,
+  eff_max_hr: Optional[float],
+  hrmax_source: str,
+  profile: Optional[dict],
+  motion: Sequence[dict],
+) -> Optional[ExerciseSession]:
+    window = [(t, v) for t, v in hr_seg if start <= t <= end]
+    if not window:
+        return None
+    bpms = [v for _, v in window]
+    peak_hr = int(round(max(bpms)))
+    duration_s = end - start
+    min_dur_s = MIN_HR_ELEVATION_MIN * 60.0
+    if peak_hr < HR_ELEVATION_PEAK_MIN:
+        return None
+    if duration_s < min_dur_s and not (peak_hr >= 140 and duration_s >= 60):
+        return None
+
+    hr_series = [{"ts": t, "bpm": v} for t, v in window]
+    if eff_max_hr is not None and eff_max_hr > resting_hr:
+        zone_pct, avg_hrr = _bout_intensity(hr_series, resting_hr, eff_max_hr)
+    else:
+        zone_pct, avg_hrr = {}, None
+
+    calories_kcal: Optional[float] = None
+    calories_kj: Optional[float] = None
+    if profile is not None:
+        calories_kcal, calories_kj = _estimate_bout_calories(
+            hr_series,
+            profile=profile,
+            hrmax=eff_max_hr,
+            resting_hr=resting_hr,
+        )
+
+    return ExerciseSession(
+        start=start,
+        end=end,
+        avg_hr=statistics.fmean(bpms),
+        peak_hr=peak_hr,
+        strain=_strain(hr_series, max_hr=eff_max_hr, resting_hr=resting_hr),
+        kind="hr_elevation",
+        duration_s=duration_s,
+        zone_time_pct=zone_pct,
+        avg_hrr_pct=avg_hrr,
+        hrmax=eff_max_hr,
+        hrmax_source=hrmax_source,
+        calories_kcal=calories_kcal,
+        calories_kj=calories_kj,
+        motion_var=_motion_variance(motion, start, end),
+        hr_peaks_per_min=_hr_peaks_per_min(hr_series),
+    )
+
+
 def detect_hr_elevations(
     streams: dict[str, list[dict]],
     *,
@@ -624,6 +887,8 @@ def detect_hr_elevations(
     hr_seg = _clean_hr(streams.get("hr") or [])
     if not hr_seg:
         return []
+
+    motion = activity_series(streams.get("gravity") or [])
 
     if resting_hr is None:
         resting_hr = _derive_resting_hr(hr_seg)
@@ -657,63 +922,42 @@ def detect_hr_elevations(
     runs.append((run_start, prev))
 
     min_dur_s = MIN_HR_ELEVATION_MIN * 60.0
+    max_dur_s = MAX_HR_ELEVATION_DURATION_MIN * 60.0
     existing = list(existing_sessions or [])
     sessions: list[ExerciseSession] = []
     for start, end in runs:
-        window = [(t, v) for t, v in hr_seg if start <= t <= end]
-        if not window:
-            continue
-        bpms = [v for _, v in window]
-        peak_hr = int(round(max(bpms)))
         duration_s = end - start
-        if peak_hr < HR_ELEVATION_PEAK_MIN:
-            continue
-        if duration_s < min_dur_s and not (peak_hr >= 140 and duration_s >= 60):
-            continue
-        if duration_s > MAX_HR_ELEVATION_DURATION_MIN * 60.0:
-            continue
-        if _overlaps_existing(start, end, existing, HR_ELEVATION_OVERLAP_FRAC):
-            continue
-
-        hr_series = [{"ts": t, "bpm": v} for t, v in window]
-        if eff_max_hr is not None and eff_max_hr > resting_hr:
-            zone_pct, avg_hrr = _bout_intensity(hr_series, resting_hr, eff_max_hr)
+        if duration_s > max_dur_s:
+            sub_runs = _subdivide_long_hr_run(start, end, hr_seg, motion, hr_floor)
         else:
-            zone_pct, avg_hrr = {}, None
+            sub_runs = [(start, end)]
 
-        calories_kcal: Optional[float] = None
-        calories_kj: Optional[float] = None
-        if profile is not None:
-            calories_kcal, calories_kj = _estimate_bout_calories(
-                hr_series,
-                profile=profile,
-                hrmax=eff_max_hr,
-                resting_hr=resting_hr,
-            )
+        for sub_start, sub_end in sub_runs:
+            sub_dur = sub_end - sub_start
+            if sub_dur > max_dur_s:
+                continue
+            if _overlaps_existing(sub_start, sub_end, existing, HR_ELEVATION_OVERLAP_FRAC):
+                continue
+            if _overlaps_existing(sub_start, sub_end, sessions, HR_ELEVATION_OVERLAP_FRAC):
+                continue
 
-        sessions.append(
-            ExerciseSession(
-                start=start,
-                end=end,
-                avg_hr=statistics.fmean(bpms),
-                peak_hr=peak_hr,
-                strain=_strain(
-                    hr_series,
-                    max_hr=eff_max_hr,
-                    resting_hr=resting_hr,
-                ),
-                kind="hr_elevation",
-                duration_s=duration_s,
-                zone_time_pct=zone_pct,
-                avg_hrr_pct=avg_hrr,
-                hrmax=eff_max_hr,
+            session = _make_hr_elevation_session(
+                sub_start,
+                sub_end,
+                hr_seg,
+                resting_hr=float(resting_hr),
+                eff_max_hr=eff_max_hr,
                 hrmax_source=hrmax_source,
-                calories_kcal=calories_kcal,
-                calories_kj=calories_kj,
-                motion_var=None,
-                hr_peaks_per_min=_hr_peaks_per_min(hr_series),
+                profile=profile,
+                motion=motion,
             )
-        )
+            if session is None:
+                continue
+            if session.duration_s < min_dur_s and not (
+                session.peak_hr >= 140 and session.duration_s >= 60
+            ):
+                continue
+            sessions.append(session)
     return sessions
 
 

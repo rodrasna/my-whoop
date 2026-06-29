@@ -24,6 +24,7 @@ from app.analysis.units import (
     resp_rate_bpm,
     # New API
     spo2_feature_window,
+    nightly_spo2_percent,
     skin_temp_deviation,
     resp_rate_from_signal,
     # Calibration-fitting routines
@@ -172,6 +173,39 @@ class TestSpo2PercentWindow:
     def test_raises_on_length_mismatch(self):
         with pytest.raises(ValueError):
             spo2_percent_window([587, 590], [585])
+
+
+# ---------------------------------------------------------------------------
+# nightly_spo2_percent — sleep summary (median of rolling windows)
+# ---------------------------------------------------------------------------
+
+class TestNightlySpo2Percent:
+
+    @staticmethod
+    def _pulsatile_triples(n: int = 120, base_ts: float = 1_700_000_000.0):
+        """Synthetic 1 Hz red/IR with small AC (passes perfusion gate)."""
+        triples = []
+        for i in range(n):
+            phase = 2 * math.pi * i / 60.0
+            red = 18_000 + 80 * math.sin(phase)
+            ir = 17_000 + 60 * math.sin(phase)
+            triples.append((base_ts + i, red, ir))
+        return triples
+
+    def test_returns_median_in_range(self):
+        result = nightly_spo2_percent(self._pulsatile_triples())
+        assert result is not None
+        assert 70.0 <= result <= 100.0
+
+    def test_none_when_too_few_samples(self):
+        assert nightly_spo2_percent(self._pulsatile_triples(n=3)) is None
+
+    def test_matches_series_median(self):
+        triples = self._pulsatile_triples()
+        from app.analysis.units import spo2_series_from_samples
+        series = spo2_series_from_samples(triples)
+        expected = round(float(np.median([p for _, p in series])), 1)
+        assert nightly_spo2_percent(triples) == expected
 
 
 # ---------------------------------------------------------------------------

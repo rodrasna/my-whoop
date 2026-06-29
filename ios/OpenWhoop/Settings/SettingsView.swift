@@ -77,6 +77,7 @@ private enum ProfileStorage {
 
 struct SettingsView: View {
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var serverSettings: ServerConnectionSettings
 
     // Unit system
     @State private var unitSystem: UnitSystem = .imperial
@@ -107,6 +108,14 @@ struct SettingsView: View {
     @State private var checkInReminderTime = SleepCheckInNotifier.defaultReminderDate
     @State private var coachLLMEnabled = CoachLLMSettings.isEnabled
     @State private var coachIncludeNote = CoachLLMSettings.includeDayNote
+
+    @State private var serverDeviceId: String = ""
+    @State private var serverBaseURL: String = ""
+    @State private var serverAPIKey: String = ""
+    @State private var serverStatusMessage: String?
+    @State private var serverStatusIsError = false
+    @State private var isTestingServer = false
+    @State private var isSavingServer = false
 
     private enum SaveStatus: Equatable {
         case idle
@@ -144,6 +153,7 @@ struct SettingsView: View {
                 weightSection
                 ageSection
                 sexSection
+                serverSection
                 checkInReminderSection
                 coachLLMSection
                 saveSection
@@ -163,7 +173,102 @@ struct SettingsView: View {
             checkInReminderTime = SleepCheckInNotifier.defaultReminderDate
             coachLLMEnabled = CoachLLMSettings.isEnabled
             coachIncludeNote = CoachLLMSettings.includeDayNote
+            serverDeviceId = serverSettings.effectiveDeviceId
+            serverBaseURL = serverSettings.baseURLOverride
+            if serverBaseURL.isEmpty, let url = ServerConnectionSettings.buildBaseURL {
+                serverBaseURL = url.absoluteString
+            }
+            serverAPIKey = serverSettings.apiKeyOverride
         }
+    }
+
+    private var serverSection: some View {
+        Section {
+            HStack {
+                Text("Estado")
+                Spacer()
+                Text(serverSettings.isServerConfigured ? "Configurado" : "Sin servidor")
+                    .foregroundStyle(serverSettings.isServerConfigured
+                                     ? WH.Color.recoveryGreen : WH.Color.recoveryYellow)
+            }
+            TextField("Identificador", text: $serverDeviceId)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(.body, design: .monospaced))
+            TextField("URL (opcional)", text: $serverBaseURL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .font(.system(.caption, design: .monospaced))
+            SecureField("Clave API (opcional)", text: $serverAPIKey)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button {
+                Task { await testServerConnection() }
+            } label: {
+                HStack {
+                    if isTestingServer { ProgressView() }
+                    Text("Probar conexión")
+                }
+            }
+            .disabled(isTestingServer || isSavingServer)
+            Button {
+                Task { await saveServerSettings() }
+            } label: {
+                HStack {
+                    if isSavingServer { ProgressView() }
+                    Text("Guardar servidor")
+                }
+            }
+            .disabled(isTestingServer || isSavingServer)
+            if let serverStatusMessage {
+                Text(serverStatusMessage)
+                    .font(WH.Font.caption)
+                    .foregroundStyle(serverStatusIsError ? WH.Color.recoveryRed : WH.Color.recoveryGreen)
+            }
+        } header: {
+            Text("Servidor")
+        } footer: {
+            Text("Cada persona debe usar un identificador distinto en el mismo servidor. Si cambias el identificador, cierra y vuelve a abrir la app para aplicar BLE y sync.")
+                .font(WH.Font.caption)
+                .foregroundStyle(WH.Color.textSecondary)
+        }
+    }
+
+    private func testServerConnection() async {
+        isTestingServer = true
+        serverStatusIsError = false
+        serverSettings.baseURLOverride = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        serverSettings.apiKeyOverride = serverAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = await serverSettings.testConnection(deviceId: serverDeviceId)
+        isTestingServer = false
+        switch result {
+        case .success(let msg):
+            serverStatusMessage = msg
+            serverStatusIsError = false
+        case .failure(let err):
+            serverStatusMessage = err.localizedDescription
+            serverStatusIsError = true
+        }
+    }
+
+    private func saveServerSettings() async {
+        isSavingServer = true
+        serverStatusIsError = false
+        let id = serverDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try serverSettings.updateDeviceId(id)
+            serverSettings.baseURLOverride = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            serverSettings.apiKeyOverride = serverAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            try serverSettings.saveAdvancedSettings()
+            await metrics.reloadServerConnection()
+            serverStatusMessage = "Guardado. Reinicia la app si cambiaste el identificador."
+            serverStatusIsError = false
+        } catch {
+            serverStatusMessage = error.localizedDescription
+            serverStatusIsError = true
+        }
+        isSavingServer = false
     }
 
     private var coachLLMSection: some View {
@@ -560,4 +665,5 @@ struct SettingsView: View {
 #Preview("Settings") {
     SettingsView()
         .environmentObject(MetricsRepository(deviceId: "preview"))
+        .environmentObject(ServerConnectionSettings.shared)
 }

@@ -22,6 +22,7 @@ final class SleepVoiceRecorder: ObservableObject {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))
+    private var isStarting = false
 
     var isRecording: Bool {
         if case .recording = phase { return true }
@@ -51,6 +52,10 @@ final class SleepVoiceRecorder: ObservableObject {
     }
 
     private func startRecording() async {
+        guard !isStarting, !isRecording else { return }
+        isStarting = true
+        defer { isStarting = false }
+
         finalTranscript = ""
         partialTranscript = ""
 
@@ -111,14 +116,17 @@ final class SleepVoiceRecorder: ObservableObject {
             phase = .recording
         } catch {
             phase = .failed("No se pudo iniciar la grabación.")
-            teardownAudio()
+            teardownAudio(removeTap: true)
         }
     }
 
     func stopRecording() {
-        guard isRecording else { return }
+        guard isRecording || isStarting else { return }
+        isStarting = false
         phase = .processing
-        audioEngine.stop()
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
         recognitionTask?.finish()
@@ -126,11 +134,21 @@ final class SleepVoiceRecorder: ObservableObject {
         if finalTranscript.isEmpty, !partialTranscript.isEmpty {
             finalTranscript = partialTranscript
         }
-        teardownAudio()
+        teardownAudio(removeTap: false)
         phase = .idle
     }
 
-    private func teardownAudio() {
+    func cancelRecording() {
+        stopRecording()
+        partialTranscript = ""
+        finalTranscript = ""
+        phase = .idle
+    }
+
+    private func teardownAudio(removeTap: Bool) {
+        if removeTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
         recognitionRequest = nil
         recognitionTask = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)

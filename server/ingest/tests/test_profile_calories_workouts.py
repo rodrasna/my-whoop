@@ -415,6 +415,38 @@ def test_get_workouts_returns_seeded_sessions(client, clean_db):
 
 
 @requires_docker
+def test_get_workouts_epoch_window(client, clean_db):
+    """GET /v1/workouts?from_ts=&to_ts= returns sessions in epoch window."""
+    with psycopg.connect(clean_db) as conn:
+        store.ensure_device(conn, "devWE")
+        store.upsert_exercise_sessions(conn, "devWE", [
+            {
+                "start": T0,
+                "end": T0 + 1800,
+                "avg_hr": 140.0,
+                "peak_hr": 165,
+                "strain": 7.0,
+                "kind": None,
+                "duration_s": 1800,
+                "zone_time_pct": {},
+                "avg_hrr_pct": 60.0,
+                "hrmax": 185.0,
+                "hrmax_source": "observed",
+                "calories_kcal": None,
+                "calories_kj": None,
+            }
+        ])
+        conn.commit()
+
+    r = client.get(
+        "/v1/workouts",
+        params={"device": "devWE", "from_ts": int(T0) - 10, "to_ts": int(T0) + 3600},
+    )
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+
+@requires_docker
 def test_get_workouts_empty_range(client, clean_db):
     """GET /v1/workouts returns [] for a date range with no sessions."""
     r = client.get("/v1/workouts",

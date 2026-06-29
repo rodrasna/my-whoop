@@ -107,4 +107,17 @@ enum TodayMetricHelpers {
         let score = 100.0 / (1.0 + exp(-1.6 * (z - (-0.20))))
         return max(0, min(100, score))
     }
+
+    /// Composite sleep score 0–100 for rings and hero (falls back to efficiency / duration).
+    static func sleepScorePercent(daily: DailyMetric?, sleep: CachedSleepSession? = nil) -> Double? {
+        if let s = daily?.sleepScore, s > 0 { return s }
+        if let e = daily?.efficiency, e > 0 { return e * 100 }
+        if let e = sleep?.efficiency, e > 0 { return e * 100 }
+        if let m = daily?.totalSleepMin, m > 0 { return min(100, m / 480 * 100) }
+        return nil
+    }
+
+    static func sleepScoreFraction(daily: DailyMetric?, sleep: CachedSleepSession? = nil) -> Double? {
+        sleepScorePercent(daily: daily, sleep: sleep).map { $0 / 100.0 }
+    }
 }

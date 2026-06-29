@@ -27,9 +27,7 @@ struct SleepRingDetailView: View {
     }
 
     private var scorePercent: Double? {
-        if let e = detail?.session.efficiency, e > 0 { return e * 100 }
-        if let e = detail?.daily?.efficiency, e > 0 { return e * 100 }
-        return nil
+        TodayMetricHelpers.sleepScorePercent(daily: detail?.daily, sleep: detail?.session)
     }
 
     var body: some View {

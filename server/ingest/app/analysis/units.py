@@ -657,6 +657,27 @@ def spo2_series_from_samples(
     return out
 
 
+def nightly_spo2_percent(
+    red_ir_pairs: "Sequence[tuple[float, float, float]]",
+    *,
+    window_radius: int = 8,
+    min_accepted: int = 5,
+) -> Optional[float]:
+    """APPROXIMATE — nightly SpO₂ summary from sleep-window red/IR samples.
+
+    Rolling-window estimates (same path as ``spo2_series_from_samples``), then
+    median of values that pass the perfusion gate.  Avoids one giant night window
+    and the crude DC ratio fallback when motion rejects that window.
+
+    Returns None when fewer than ``min_accepted`` windows are accepted.
+    """
+    series = spo2_series_from_samples(red_ir_pairs, window_radius=window_radius)
+    if len(series) < min_accepted:
+        return None
+    values = [pct for _, pct in series]
+    return round(float(statistics.median(values)), 1)
+
+
 def resp_rate_bpm(raw: float) -> float:
     """
     APPROXIMATE — single-sample legacy interface: convert a raw ADC/sensor count

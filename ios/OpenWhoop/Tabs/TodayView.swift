@@ -152,9 +152,7 @@ struct TodayView: View {
     }
 
     private var todaySleepEfficiencyPct: Double? {
-        if let e = nightSleep?.efficiency, e > 0 { return e * 100 }
-        if let e = dayMetric?.efficiency, e > 0 { return e * 100 }
-        return nil
+        TodayMetricHelpers.sleepScorePercent(daily: dayMetric, sleep: nightSleep)
     }
 
     private var scrollContent: some View {
@@ -551,12 +549,9 @@ struct TodayView: View {
 
     // MARK: - Dashboard rows (embedded en tarjeta única)
 
-    /// Calificación del sueño (sesión) o eficiencia diaria; no mezclar con eficiencia 92% vs score 82%.
+    /// Calificación compuesta del sueño (servidor) con fallback a eficiencia / horas.
     private var sleepFraction: Double? {
-        if let e = nightSleep?.efficiency, e > 0 { return e }
-        if let e = dayMetric?.efficiency, e > 0 { return e }
-        if let m = dayMetric?.totalSleepMin, m > 0 { return min(1, m / 480) }
-        return nil
+        TodayMetricHelpers.sleepScoreFraction(daily: dayMetric, sleep: nightSleep)
     }
 
     private var stressMonitorPlaceholder: some View {

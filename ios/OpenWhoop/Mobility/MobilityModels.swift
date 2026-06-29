@@ -88,14 +88,45 @@ enum MobilityIntensity: String, Codable {
     case gentle, moderate
 }
 
+enum MobilitySide: String, Codable, Equatable {
+    case left, right
+
+    var label: String {
+        switch self {
+        case .left:  return "Lado izquierdo"
+        case .right: return "Lado derecho"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .left:  return "Izquierdo"
+        case .right: return "Derecho"
+        }
+    }
+}
+
 struct MobilityRoutineStep: Equatable, Identifiable {
     let exercise: MobilityExercise
     let guidedDurationSec: Int
+    /// Presente cuando el ejercicio se hace un lado y luego el otro.
+    let side: MobilitySide?
 
-    var id: String { exercise.id }
+    var id: String {
+        if let side { return "\(exercise.id)-\(side.rawValue)" }
+        return exercise.id
+    }
+
+    var displayTitle: String {
+        guard let side else { return exercise.name }
+        return "\(exercise.name) · \(side.shortLabel)"
+    }
 
     var guidedDurationLabel: String {
-        MobilityTiming.durationLabel(seconds: guidedDurationSec)
+        if side != nil {
+            return "\(MobilityTiming.durationLabel(seconds: guidedDurationSec)) / lado"
+        }
+        return MobilityTiming.durationLabel(seconds: guidedDurationSec)
     }
 }
 
@@ -116,9 +147,11 @@ struct MobilityExercise: Codable, Identifiable, Equatable {
     let movementPatterns: [MobilityMovementPattern]
     let mobilityMode: MobilityMode
     let maxHoldSec: Int?
+    /// Si true, el temporizador guiado corre 1 min por lado (izquierdo y derecho).
+    let bilateral: Bool?
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, description, pose, intensity
+        case id, name, description, pose, intensity, bilateral
         case focusAreas = "focus_areas"
         case sessionKinds = "session_kinds"
         case youtubeURL = "youtube_url"
@@ -128,6 +161,31 @@ struct MobilityExercise: Codable, Identifiable, Equatable {
         case movementPatterns = "movement_patterns"
         case mobilityMode = "mobility_mode"
         case maxHoldSec = "max_hold_sec"
+    }
+
+    /// Ejercicios que se hacen por lado (cada lado con su propio minuto).
+    var isBilateral: Bool {
+        if let bilateral { return bilateral }
+        if Self.implicitBilateralIDs.contains(id) { return true }
+        return Self.descriptionImpliesBilateral(description)
+    }
+
+    private static let implicitBilateralIDs: Set<String> = [
+        "couch-stretch",
+        "ankle-rocks",
+        "thread-needle",
+        "hip-flexor-lunge",
+        "thoracic-rotation-quad",
+        "standing-hamstring",
+        "doorway-pec-stretch",
+        "forearm-extensor-stretch",
+    ]
+
+    private static func descriptionImpliesBilateral(_ description: String) -> Bool {
+        let d = description.lowercased()
+        return d.contains("cambia de lado")
+            || d.contains("cambia de pierna")
+            || d.contains("alterna lados")
     }
 
     init(from decoder: Decoder) throws {
@@ -146,6 +204,7 @@ struct MobilityExercise: Codable, Identifiable, Equatable {
         movementPatterns = try c.decodeIfPresent([MobilityMovementPattern].self, forKey: .movementPatterns) ?? []
         mobilityMode = try c.decodeIfPresent(MobilityMode.self, forKey: .mobilityMode) ?? .dynamic
         maxHoldSec = try c.decodeIfPresent(Int.self, forKey: .maxHoldSec)
+        bilateral = try c.decodeIfPresent(Bool.self, forKey: .bilateral)
     }
 
     init(
@@ -162,7 +221,8 @@ struct MobilityExercise: Codable, Identifiable, Equatable {
         intensity: MobilityIntensity,
         movementPatterns: [MobilityMovementPattern] = [],
         mobilityMode: MobilityMode = .dynamic,
-        maxHoldSec: Int? = nil
+        maxHoldSec: Int? = nil,
+        bilateral: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -178,6 +238,7 @@ struct MobilityExercise: Codable, Identifiable, Equatable {
         self.movementPatterns = movementPatterns
         self.mobilityMode = mobilityMode
         self.maxHoldSec = maxHoldSec
+        self.bilateral = bilateral
     }
 }
 

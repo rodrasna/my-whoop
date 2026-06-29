@@ -1016,3 +1016,66 @@ def test_hr_elevation_skipped_when_overlapping_motion_session():
     all_sessions = dedupe_overlapping_sessions(exercises + elevations)
     assert len(all_sessions) == 1
     assert all_sessions[0].kind is None
+
+
+def test_long_hr_elevation_subdivided_by_motion_clusters():
+    """A multi-hour elevated-HR block with two active motion clusters → ≥2 sessions."""
+    work_n = 45 * 60
+    gap_n = 20 * 60
+    pad = 15 * 60
+    a_start = T0 + pad
+    gap_start = a_start + work_n
+    b_start = gap_start + gap_n
+
+    hr = _merge(
+        _hr_block(T0, pad, 60),
+        _hr_block(a_start, work_n, 155),
+        _hr_block(gap_start, gap_n, 95),
+        _hr_block(b_start, work_n, 165),
+        _hr_block(b_start + work_n, pad, 70),
+    )
+    gravity = _merge(
+        _gravity_still(T0, pad),
+        _gravity_active(a_start, work_n, amp=1.2),
+        _gravity_still(gap_start, gap_n),
+        _gravity_active(b_start, work_n, amp=1.2),
+        _gravity_still(b_start + work_n, pad),
+    )
+    bridge_start = a_start - 10 * 60
+    bridge_n = int((b_start + work_n) - bridge_start + 10 * 60)
+    hr = _merge(_hr_block(bridge_start, bridge_n, 120), hr)
+    gravity = _merge(_gravity_still(bridge_start, bridge_n), gravity)
+
+    elevations = detect_hr_elevations(
+        {"hr": hr, "gravity": gravity},
+        resting_hr=55,
+        max_hr=190,
+    )
+    assert len(elevations) >= 2, f"expected subdivided sessions, got {len(elevations)}"
+    assert all(e.peak_hr >= 115 for e in elevations)
+
+
+def test_long_hr_elevation_subdivided_at_motion_rest_valley():
+    """A 3-hour elevated-HR block split by a 10-minute motion rest valley."""
+    total = 3 * 60 * 60
+    rest_offset = 75 * 60
+    rest_n = 10 * 60
+    work_before = rest_offset
+    work_after = total - rest_offset - rest_n
+
+    hr = _merge(
+        _hr_block(T0, work_before, 125),
+        _hr_block(T0 + rest_offset, rest_n, 90),
+        _hr_block(T0 + rest_offset + rest_n, work_after, 130),
+    )
+    gravity = _merge(
+        _gravity_active(T0, work_before, amp=0.6),
+        _gravity_still(T0 + rest_offset, rest_n),
+        _gravity_active(T0 + rest_offset + rest_n, work_after, amp=0.6),
+    )
+    elevations = detect_hr_elevations(
+        {"hr": hr, "gravity": gravity},
+        resting_hr=55,
+        max_hr=190,
+    )
+    assert len(elevations) >= 2, f"expected split at rest valley, got {len(elevations)}"

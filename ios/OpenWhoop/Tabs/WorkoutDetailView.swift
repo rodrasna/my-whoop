@@ -242,7 +242,8 @@ struct WorkoutDetailView: View {
                             ).category == .likelyWorkout)
                 }
             )
-            if !resolved.blocksDone.isEmpty || resolved.note != nil || dayPlanStore.plan(for: dayKey) != nil {
+            if resolved.primary?.id == workout.id,
+               !resolved.blocksDone.isEmpty || resolved.note != nil || dayPlanStore.plan(for: dayKey) != nil {
                 VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                     HStack {
                         Text("ESTRUCTURA DEL DÍA")
