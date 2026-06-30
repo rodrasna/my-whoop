@@ -209,7 +209,7 @@ struct CrossFitView: View {
                                   weekday: String(wd),
                                   dayOfMonth: cal.component(.day, from: day),
                                   value: Double(mins),
-                                  isToday: cal.isDate(day, inSameDayAs: today))
+                                  isHighlighted: cal.isDate(day, inSameDayAs: today))
         }
     }
 

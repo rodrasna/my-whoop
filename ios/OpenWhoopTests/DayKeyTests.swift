@@ -29,9 +29,16 @@ final class DayKeyTests: XCTestCase {
             disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil, strain: 12.0,
             exerciseCount: 2
         )
-        let points = WeeklyChartBuilder.last7Days(from: [row], value: { $0.strain }, calendar: cal)
+        let points = WeeklyChartBuilder.last7Days(
+            from: [row],
+            endingOn: today,
+            highlightDayKey: key,
+            value: { $0.strain },
+            calendar: cal
+        )
         XCTAssertEqual(points.last?.id, key)
         XCTAssertEqual(points.last?.value, 12.0)
+        XCTAssertTrue(points.last?.isHighlighted == true)
     }
 
     func testUtcDayKeyStillUsesUtcMidnightEpoch() {

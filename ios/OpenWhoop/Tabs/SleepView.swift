@@ -242,6 +242,12 @@ struct SleepView: View {
             }
 
             if let session = session {
+                if let durations = TodayMetricHelpers.sleepNightDurations(daily: daily, session: session) {
+                    Text("Dormido · \(TodayMetricHelpers.formatSleepMinutes(durations.asleepMin))")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(WH.Color.textPrimary)
+                        .monospacedDigit()
+                }
                 Text("Noche · \(formatTime(session.startTs)) → \(formatTime(session.endTs))")
                     .font(.system(size: 13, weight: .medium, design: .default))
                     .fontWidth(.condensed)
@@ -361,6 +367,12 @@ struct SleepView: View {
 
             // Stats row
             HStack(spacing: WH.Spacing.sm) {
+                if let durations = TodayMetricHelpers.sleepNightDurations(daily: daily, session: session) {
+                    smallStatTile(
+                        label: "TIEMPO DORMIDO",
+                        value: TodayMetricHelpers.formatSleepMinutes(durations.asleepMin)
+                    )
+                }
                 smallStatTile(label: "TIEMPO EN CAMA", value: timeInBed ?? "—")
                 smallStatTile(label: "PERTURBACIONES", value: daily?.disturbances.map { "\($0)" } ?? "—")
                 smallStatTile(label: "LATENCIA", value: latencyMin)

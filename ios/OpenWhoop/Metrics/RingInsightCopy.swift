@@ -73,8 +73,7 @@ enum RingInsightCopy {
         let effPct = TodayMetricHelpers.sleepScorePercent(daily: daily, sleep: session)
         guard let efficiencyPct = effPct else { return nil }
 
-        let totalMin = daily?.totalSleepMin
-            ?? session.map { Double($0.endTs - $0.startTs) / 60 }
+        let totalMin = TodayMetricHelpers.sleepNightDurations(daily: daily, session: session)?.asleepMin
 
         var remPct: Double?
         var deepPct: Double?

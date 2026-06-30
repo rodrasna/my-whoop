@@ -14,6 +14,7 @@ struct SleepRingDetailView: View {
     let anchorDate: Date
 
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var tabRouter: RootTabRouter
     @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
     @State private var weekRows: [DailyMetric] = []
     @State private var weekNights: [CachedSleepSession] = []
@@ -54,12 +55,17 @@ struct SleepRingDetailView: View {
 
                     ringWeekChart(
                         title: "Sueño · últimos 7 días",
-                        points: WeeklyChartBuilder.last7Days(from: weekRows) { m in
+                        points: WeeklyChartBuilder.last7Days(
+                            from: weekRows,
+                            endingOn: anchorDate,
+                            highlightDayKey: MetricsRepository.localDayString(for: anchorDate)
+                        ) { m in
                             m.totalSleepMin.map { $0 / 60 }
                         },
                         maxValue: 10,
                         color: WH.Color.sleepPurple,
-                        format: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") }
+                        format: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") },
+                        onSelectDay: selectChartDay
                     )
 
                     NavigationLink(destination: MetricDetailView(kind: .sleepDuration)) {
@@ -90,6 +96,11 @@ struct SleepRingDetailView: View {
         }
         weekRows = await metrics.dailyLastDays(7, endingOn: anchorDate)
         weekNights = await metrics.sevenNightSleepWake(nights: 7)
+    }
+
+    private func selectChartDay(_ dayKey: String) {
+        guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+        tabRouter.selectedDate = date
     }
 
     private var sleepInsightText: String? {
@@ -130,6 +141,7 @@ struct RecoveryRingDetailView: View {
     let anchorDate: Date
 
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var tabRouter: RootTabRouter
     @State private var weekRows: [DailyMetric] = []
     @State private var nightCount = 0
     @State private var dayMetric: DailyMetric?
@@ -211,10 +223,15 @@ struct RecoveryRingDetailView: View {
 
                     ringWeekChart(
                         title: "Recuperación · últimos 7 días",
-                        points: WeeklyChartBuilder.last7Days(from: weekRows) { $0.recovery.map { $0 * 100 } },
+                        points: WeeklyChartBuilder.last7Days(
+                            from: weekRows,
+                            endingOn: anchorDate,
+                            highlightDayKey: MetricsRepository.localDayString(for: anchorDate)
+                        ) { $0.recovery.map { $0 * 100 } },
                         maxValue: 100,
                         color: WH.Color.recoveryGreen,
-                        format: { "\(Int($0.rounded()))" }
+                        format: { "\(Int($0.rounded()))" },
+                        onSelectDay: selectChartDay
                     )
 
                     NavigationLink(destination: MetricDetailView(kind: .recovery)) {
@@ -258,6 +275,11 @@ struct RecoveryRingDetailView: View {
         weekRows = await metrics.dailyLastDays(7, endingOn: anchorDate)
         nightCount = await metrics.sleepNightCount()
     }
+
+    private func selectChartDay(_ dayKey: String) {
+        guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+        tabRouter.selectedDate = date
+    }
 }
 
 // MARK: - StrainRingDetailView
@@ -266,6 +288,7 @@ struct StrainRingDetailView: View {
     let anchorDate: Date
 
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var tabRouter: RootTabRouter
     @State private var weekRows: [DailyMetric] = []
     @State private var dayMetric: DailyMetric?
     @State private var dayKcal: Double?
@@ -316,10 +339,15 @@ struct StrainRingDetailView: View {
 
                     ringWeekChart(
                         title: "Esfuerzo · últimos 7 días",
-                        points: WeeklyChartBuilder.last7Days(from: weekRows) { $0.strain },
+                        points: WeeklyChartBuilder.last7Days(
+                            from: weekRows,
+                            endingOn: anchorDate,
+                            highlightDayKey: MetricsRepository.localDayString(for: anchorDate)
+                        ) { $0.strain },
                         maxValue: 21,
                         color: WH.Color.strainBlue,
-                        format: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") }
+                        format: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") },
+                        onSelectDay: selectChartDay
                     )
 
                     NavigationLink(destination: MetricDetailView(kind: .strain)) {
@@ -354,6 +382,11 @@ struct StrainRingDetailView: View {
         let kcal = workouts.compactMap(\.caloriesKcal).reduce(0, +)
         dayKcal = kcal > 0 ? kcal : nil
     }
+
+    private func selectChartDay(_ dayKey: String) {
+        guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+        tabRouter.selectedDate = date
+    }
 }
 
 // MARK: - Shared helpers
@@ -363,7 +396,8 @@ private func ringWeekChart(
     points: [WeeklyBarPoint],
     maxValue: Double,
     color: Color,
-    format: @escaping (Double) -> String
+    format: @escaping (Double) -> String,
+    onSelectDay: ((String) -> Void)? = nil
 ) -> some View {
     Group {
         if points.contains(where: { $0.value > 0 }) {
@@ -372,7 +406,8 @@ private func ringWeekChart(
                 points: points,
                 maxValue: maxValue,
                 barColor: color,
-                formatValue: format
+                formatValue: format,
+                onSelectDay: onSelectDay
             )
         }
     }

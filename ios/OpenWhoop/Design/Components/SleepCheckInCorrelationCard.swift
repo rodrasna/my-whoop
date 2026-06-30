@@ -7,9 +7,13 @@ import Charts
 struct SleepCheckInCorrelationCard: View {
     @ObservedObject private var store = SleepCheckInStore.shared
 
-    private enum ChartSeries: String {
+    private enum ChartSeries: String, CaseIterable {
         case feeling = "Sensación"
         case recovery = "Recovery"
+    }
+
+    private func yValue(_ pt: CorrelationPoint, series: ChartSeries) -> Double {
+        series == .feeling ? pt.feeling : pt.recovery
     }
 
     private var chartPoints: [CorrelationPoint] {
@@ -69,32 +73,30 @@ struct SleepCheckInCorrelationCard: View {
 
     private var chart: some View {
         Chart {
+            ForEach(ChartSeries.allCases, id: \.self) { series in
+                ForEach(chartPoints) { pt in
+                    LineMark(
+                        x: .value("Día", pt.date),
+                        y: .value("Valor", yValue(pt, series: series)),
+                        series: .value("Métrica", series.rawValue)
+                    )
+                    .foregroundStyle(series == .feeling ? WH.Color.sleepPurple : WH.Color.recoveryGreen)
+                    .lineStyle(StrokeStyle(
+                        lineWidth: 2,
+                        lineCap: .round,
+                        lineJoin: .round,
+                        dash: series == .recovery ? [5, 4] : []
+                    ))
+                    .interpolationMethod(.linear)
+                }
+            }
             ForEach(chartPoints) { pt in
-                LineMark(
-                    x: .value("Día", pt.date),
-                    y: .value("Valor", pt.feeling),
-                    series: .value("Métrica", ChartSeries.feeling.rawValue)
-                )
-                .foregroundStyle(WH.Color.sleepPurple)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.linear)
-
                 PointMark(
                     x: .value("Día", pt.date),
                     y: .value("Valor", pt.feeling)
                 )
                 .foregroundStyle(WH.Color.sleepPurple)
                 .symbolSize(28)
-            }
-            ForEach(chartPoints) { pt in
-                LineMark(
-                    x: .value("Día", pt.date),
-                    y: .value("Valor", pt.recovery),
-                    series: .value("Métrica", ChartSeries.recovery.rawValue)
-                )
-                .foregroundStyle(WH.Color.recoveryGreen)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [5, 4]))
-                .interpolationMethod(.linear)
 
                 PointMark(
                     x: .value("Día", pt.date),

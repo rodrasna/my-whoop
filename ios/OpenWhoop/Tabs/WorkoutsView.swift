@@ -22,6 +22,7 @@ struct WorkoutsView: View {
 
     @State private var workouts: [Workout] = []
     @State private var weekRows: [DailyMetric] = []
+    @State private var strainChartRows: [DailyMetric] = []
     @State private var selectedDayMetric: DailyMetric?
     @State private var collapsedSections: Set<DayActivitySection> = [.hrSignals]
     @State private var isLoading = true
@@ -31,6 +32,8 @@ struct WorkoutsView: View {
     @State private var coachReport: TrainingDayCoachReport?
     @State private var coachNarrative: String?
     @State private var coachLoading = false
+
+    private let strainChartDayCount = 28
 
     // MARK: - Body
 
@@ -215,12 +218,24 @@ struct WorkoutsView: View {
                 crossFitCard
                 coachAnalysisSection
 
-                if !weekRows.isEmpty || selectedDayStrain != nil {
+                if !strainChartRows.isEmpty || selectedDayStrain != nil {
                     WeeklyBarChart(
                         title: "Esfuerzo",
-                        points: WeeklyChartBuilder.last7Days(from: weekRows) { $0.strain },
+                        points: WeeklyChartBuilder.lastNDays(
+                            strainChartDayCount,
+                            from: strainChartRows,
+                            endingOn: Date(),
+                            highlightDayKey: selectedDayKey,
+                            value: { $0.strain }
+                        ),
                         maxValue: 21,
-                        barColor: WH.Color.strainBlue
+                        barColor: WH.Color.strainBlue,
+                        formatValue: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") },
+                        onSelectDay: { dayKey in
+                            guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+                            tabRouter.selectedDate = date
+                        },
+                        isScrollable: true
                     )
                     .padding(.horizontal, WH.Spacing.md)
                 }
@@ -241,6 +256,12 @@ struct WorkoutsView: View {
                     .font(WH.Font.caption)
                     .foregroundStyle(WH.Color.textSecondary)
             } else {
+                if let summary = strainActivitySummary {
+                    Text(summary)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(WH.Color.textPrimary)
+                        .multilineTextAlignment(.center)
+                }
                 Text("Calculado por FC y tiempo en zona — el tipo de actividad que etiquetes no cambia el strain.")
                     .font(.system(size: 11))
                     .foregroundStyle(WH.Color.textSecondary.opacity(0.85))
@@ -250,6 +271,38 @@ struct WorkoutsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.top, WH.Spacing.sm)
+    }
+
+    private var strainActivitySummary: String? {
+        let local = selectedDayActivities.count
+        let server = serverExerciseCount(for: selectedDayKey) ?? 0
+        let train = selectedDayActivities.filter(isTrainingBout).count
+        if local > 0 {
+            if train > 0 {
+                return "\(local) actividad\(local == 1 ? "" : "es") · \(train) entreno\(train == 1 ? "" : "s")"
+            }
+            return "\(local) actividad\(local == 1 ? "" : "es") detectada\(local == 1 ? "" : "s")"
+        }
+        if server > 0 {
+            return "\(server) actividad\(server == 1 ? "" : "es") en el servidor — desliza para cargar"
+        }
+        if selectedDayStrain != nil {
+            return "Esfuerzo acumulado — sin actividades listadas aún"
+        }
+        return nil
+    }
+
+    private func serverExerciseCount(for dayKey: String) -> Int? {
+        if isViewingToday, metrics.today?.day == dayKey, let c = metrics.today?.exerciseCount {
+            return c
+        }
+        if selectedDayMetric?.day == dayKey, let c = selectedDayMetric?.exerciseCount {
+            return c
+        }
+        if let c = weekRows.first(where: { $0.day == dayKey })?.exerciseCount {
+            return c
+        }
+        return strainChartRows.first(where: { $0.day == dayKey })?.exerciseCount
     }
 
     private var isViewingToday: Bool {
@@ -621,29 +674,33 @@ struct WorkoutsView: View {
     }
 
     private var summaryStrip: some View {
+        let serverCount = serverExerciseCount(for: selectedDayKey) ?? 0
+        let total = max(selectedDayActivities.count, serverCount)
         let train = activityGroups.first(where: { $0.section == .workouts })?.items.count ?? 0
-        let other = selectedDayActivities.count - train
+        let other = max(0, total - train)
         let dayMin = selectedDayActivities.reduce(0) { $0 + $1.durationS } / 60
         return HStack(spacing: WH.Spacing.lg) {
-            summaryItem(value: "\(selectedDayActivities.count)", unit: "total", label: "ACTIVIDADES")
+            summaryItem(value: "\(total)", unit: "total", label: "ACTIVIDADES")
             summaryItem(value: "\(train)", unit: train == 1 ? "entreno" : "entrenos", label: "ENTRENOS")
             summaryItem(value: "\(other)", unit: "otras", label: "FC / OTROS")
-            summaryItem(value: "\(dayMin)", unit: "min", label: "TIEMPO")
+            summaryItem(value: dayMin > 0 ? "\(dayMin)" : "—", unit: dayMin > 0 ? "min" : nil, label: "TIEMPO")
             Spacer()
         }
         .padding(.horizontal, WH.Spacing.md)
     }
 
-    private func summaryItem(value: String, unit: String, label: String) -> some View {
+    private func summaryItem(value: String, unit: String?, label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .lastTextBaseline, spacing: 3) {
                 Text(value)
                     .font(WH.Font.metricMedium(size: 26))
                     .foregroundStyle(WH.Color.textPrimary)
                     .monospacedDigit()
-                Text(unit)
-                    .font(.system(size: 12))
-                    .foregroundStyle(WH.Color.textSecondary)
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: 12))
+                        .foregroundStyle(WH.Color.textSecondary)
+                }
             }
             Text(label)
                 .font(.system(size: 9, weight: .semibold))
@@ -848,6 +905,10 @@ struct WorkoutsView: View {
             return "No hay métricas en caché. Comprueba que el Mac/servidor esté encendido y desliza para sincronizar."
         }
         if selectedDayStrain != nil {
+            let server = serverExerciseCount(for: selectedDayKey) ?? 0
+            if server > 0 {
+                return "Hay esfuerzo y el servidor cuenta \(server) actividad\(server == 1 ? "" : "es"). Desliza para sincronizar y ver la lista."
+            }
             return "Hay esfuerzo registrado pero ningún entreno concreto. Desliza para sincronizar — la app reintentará detectar actividades de ese día."
         }
         return "Las actividades se detectan a partir de tu frecuencia cardíaca. Si acabas de entrenar, puede tardar unos minutos en sincronizar. Desliza hacia abajo para actualizar."
@@ -1053,6 +1114,7 @@ struct WorkoutsView: View {
         let fetched = await metrics.workouts(from: from, to: to)
         workouts = fetched
         await reloadWeekRows()
+        await reloadStrainChartRows()
         await reloadSelectedDay()
         await reloadCoachReport()
         if metrics.isServerConfigured, fetched.isEmpty, selectedDayActivities.isEmpty {
@@ -1067,6 +1129,11 @@ struct WorkoutsView: View {
 
     private func reloadWeekRows() async {
         weekRows = await metrics.dailyLastDays(7, endingOn: selectedDate)
+    }
+
+    /// Ventana fija hasta hoy para el gráfico deslizable (no sigue al día seleccionado).
+    private func reloadStrainChartRows() async {
+        strainChartRows = await metrics.dailyLastDays(strainChartDayCount, endingOn: Date())
     }
 
     private func reloadSelectedDay() async {
@@ -1101,12 +1168,18 @@ struct WorkoutsView: View {
         }
 
         let strainBeforeBackfill = strainForSelectedDayIgnoringActivities()
+        let serverCount = serverExerciseCount(for: dayKey) ?? 0
         if dayList.filter({ isOnSelectedDay($0.startTs) }).isEmpty,
-           let strain = strainBeforeBackfill, strain > 0,
-           metrics.isServerConfigured {
+           metrics.isServerConfigured,
+           (strainBeforeBackfill ?? 0) > 0 || serverCount > 0 {
             _ = await metrics.backfillWorkouts(from: prevKey, to: dayKey)
             dayList = await loadDayWorkouts()
             replaceWorkouts(forSelectedDay: dayList)
+        }
+
+        let groups = activityGroups
+        if groups.count == 1, groups[0].section == .hrSignals {
+            collapsedSections.remove(.hrSignals)
         }
     }
 

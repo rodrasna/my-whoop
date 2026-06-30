@@ -325,13 +325,14 @@ struct TodayView: View {
                 .tracking(1.2)
 
             if let s {
-                let durMin = Double(s.endTs - s.startTs) / 60
+                let durations = TodayMetricHelpers.sleepNightDurations(daily: dayMetric, session: s)
+                let durMin = durations?.asleepMin ?? 0
                 Button { ringDestination = .sleep } label: {
                     HStack(spacing: WH.Spacing.md) {
                         HStack(spacing: WH.Spacing.xs) {
                             Image(systemName: "moon.fill")
                                 .font(.system(size: 13, weight: .semibold))
-                            Text(formatSleepMinutes(durMin))
+                            Text(TodayMetricHelpers.formatSleepMinutes(durMin))
                                 .font(.system(size: 15, weight: .bold, design: .default))
                                 .fontWidth(.condensed)
                                 .monospacedDigit()
@@ -342,10 +343,18 @@ struct TodayView: View {
                         .background(WH.Color.sleepBlue,
                                     in: RoundedRectangle(cornerRadius: WH.Radius.small, style: .continuous))
 
-                        Text("SUEÑO")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(WH.Color.textPrimary)
-                            .tracking(0.8)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("SUEÑO")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(WH.Color.textPrimary)
+                                .tracking(0.8)
+                            if let tib = durations?.inBedMin,
+                               abs(tib - durMin) >= 12 {
+                                Text("en cama \(TodayMetricHelpers.formatSleepMinutes(tib))")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(WH.Color.textSecondary)
+                            }
+                        }
 
                         Spacer()
 
@@ -501,8 +510,13 @@ struct TodayView: View {
     }
 
     private var weeklyTrendsSection: some View {
-        VStack(spacing: WH.Spacing.sm) {
-            let activityPts = WeeklyChartBuilder.last7Days(from: weekRows) {
+        let highlight = MetricsRepository.localDayString(for: selectedDate)
+        return VStack(spacing: WH.Spacing.sm) {
+            let activityPts = WeeklyChartBuilder.last7Days(
+                from: weekRows,
+                endingOn: selectedDate,
+                highlightDayKey: highlight
+            ) {
                 $0.exerciseCount.map { Double($0) }
             }
             if activityPts.contains(where: { $0.value > 0 }) {
@@ -511,12 +525,22 @@ struct TodayView: View {
                         title: "Actividades",
                         points: activityPts,
                         barColor: WH.Color.strainBlue,
-                        formatValue: { "\(Int($0.rounded()))" }
+                        formatValue: { "\(Int($0.rounded()))" },
+                        onSelectDay: { dayKey in
+                            guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+                            tabRouter.selectedDate = date
+                            tabRouter.selectedTab = RootTabRouter.Tab.activity.rawValue
+                        }
                     )
                 }
                 .buttonStyle(.plain)
             }
-            let strainPts = WeeklyChartBuilder.last7Days(from: weekRows) { $0.strain }
+            let strainPts = WeeklyChartBuilder.last7Days(
+                from: weekRows,
+                endingOn: selectedDate,
+                highlightDayKey: highlight,
+                value: { $0.strain }
+            )
             if strainPts.contains(where: { $0.value > 0 }) {
                 NavigationLink(destination: MetricDetailView(kind: .strain)) {
                     WeeklyBarChart(
@@ -524,12 +548,20 @@ struct TodayView: View {
                         points: strainPts,
                         maxValue: 21,
                         barColor: WH.Color.strainBlue,
-                        formatValue: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") }
+                        formatValue: { String(format: "%.1f", $0).replacingOccurrences(of: ".", with: ",") },
+                        onSelectDay: { dayKey in
+                            guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+                            tabRouter.selectedDate = date
+                        }
                     )
                 }
                 .buttonStyle(.plain)
             }
-            let recoveryPts = WeeklyChartBuilder.last7Days(from: weekRows) { m in
+            let recoveryPts = WeeklyChartBuilder.last7Days(
+                from: weekRows,
+                endingOn: selectedDate,
+                highlightDayKey: highlight
+            ) { m in
                 m.recovery.map { $0 * 100 }
             }
             if recoveryPts.contains(where: { $0.value > 0 }) {
@@ -539,7 +571,11 @@ struct TodayView: View {
                         points: recoveryPts,
                         maxValue: 100,
                         barColor: WH.Color.recoveryGreen,
-                        formatValue: { "\(Int($0.rounded()))" }
+                        formatValue: { "\(Int($0.rounded()))" },
+                        onSelectDay: { dayKey in
+                            guard let date = MetricsRepository.parseLocalDay(dayKey) else { return }
+                            tabRouter.selectedDate = date
+                        }
                     )
                 }
                 .buttonStyle(.plain)
@@ -656,14 +692,7 @@ struct TodayView: View {
     private var sleepRow: some View { sleepRowBody(embedded: false) }
 
     private func sleepRowBody(embedded: Bool) -> some View {
-        let sleepMin: Double? = {
-            if let m = dayMetric?.totalSleepMin, m > 0 { return m }
-            if let s = nightSleep {
-                let d = Double(s.endTs - s.startTs) / 60
-                return d > 0 ? d : nil
-            }
-            return nil
-        }()
+        let sleepMin = TodayMetricHelpers.sleepNightDurations(daily: dayMetric, session: nightSleep)?.asleepMin
         let eff: Double? = {
             guard sleepMin != nil else { return nil }
             if let e = dayMetric?.efficiency, e > 0 { return e }
@@ -673,7 +702,7 @@ struct TodayView: View {
         return DashboardRow(
             icon: "bed.double",
             label: "Anoche",
-            value: sleepMin.map { formatSleepMinutes($0) } ?? "—",
+            value: sleepMin.map { TodayMetricHelpers.formatSleepMinutes($0) } ?? "—",
             baseline: eff.map { "\(Int(($0 * 100).rounded()))% efic." },
             accentColor: sleepMin != nil ? WH.Color.textPrimary : WH.Color.textSecondary,
             embedded: embedded)
