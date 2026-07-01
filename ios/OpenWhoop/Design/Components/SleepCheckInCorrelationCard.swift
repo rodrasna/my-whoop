@@ -1,16 +1,10 @@
 import SwiftUI
-import Charts
 
 // MARK: - SleepCheckInCorrelationCard
 // Contrasta sensación subjetiva vs recovery de la pulsera en los últimos días.
 
 struct SleepCheckInCorrelationCard: View {
     @ObservedObject private var store = SleepCheckInStore.shared
-
-    private enum ChartSeries: String {
-        case feeling = "Sensación"
-        case recovery = "Recovery"
-    }
 
     private var chartPoints: [CorrelationPoint] {
         store.recentEntries(limit: 14)
@@ -35,10 +29,11 @@ struct SleepCheckInCorrelationCard: View {
     }
 
     var body: some View {
-        if chartPoints.count >= 2 {
+        if chartPoints.count >= 2, let xDomain = chartXDomain {
             VStack(alignment: .leading, spacing: WH.Spacing.sm) {
                 header
-                chart
+                CorrelationDualLineChart(points: chartPoints, xDomain: xDomain)
+                    .frame(height: 160)
                 legend
                 if let insight = topInsight {
                     Text(insight)
@@ -65,79 +60,6 @@ struct SleepCheckInCorrelationCard: View {
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(WH.Color.textSecondary)
         }
-    }
-
-    private var chart: some View {
-        // Swift Charts merges marks that share the same Y plottable key ("Valor") into one
-        // polyline — even with `series:` — which draws spurious arcs between sensación and
-        // recovery on the same day. Each metric needs its own Y key name.
-        Chart {
-            ForEach(chartPoints) { pt in
-                LineMark(
-                    x: .value("Día", pt.date),
-                    y: .value(ChartSeries.feeling.rawValue, pt.feeling)
-                )
-                .foregroundStyle(WH.Color.sleepPurple)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.linear)
-
-                PointMark(
-                    x: .value("Día", pt.date),
-                    y: .value(ChartSeries.feeling.rawValue, pt.feeling)
-                )
-                .foregroundStyle(WH.Color.sleepPurple)
-                .symbolSize(28)
-            }
-            ForEach(chartPoints) { pt in
-                LineMark(
-                    x: .value("Día", pt.date),
-                    y: .value(ChartSeries.recovery.rawValue, pt.recovery)
-                )
-                .foregroundStyle(WH.Color.recoveryGreen)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [5, 4]))
-                .interpolationMethod(.linear)
-
-                PointMark(
-                    x: .value("Día", pt.date),
-                    y: .value(ChartSeries.recovery.rawValue, pt.recovery)
-                )
-                .foregroundStyle(WH.Color.recoveryGreen)
-                .symbolSize(22)
-                .symbol {
-                    Circle()
-                        .strokeBorder(WH.Color.recoveryGreen, lineWidth: 2)
-                        .background(Circle().fill(WH.Color.surface))
-                }
-            }
-        }
-        .chartYScale(domain: 0...100)
-        .chartXScale(domain: chartXDomain ?? Date()...Date())
-        .chartYAxis {
-            AxisMarks(position: .leading, values: [0, 50, 100]) { value in
-                AxisGridLine().foregroundStyle(WH.Color.separator.opacity(0.4))
-                AxisValueLabel {
-                    if let v = value.as(Double.self) {
-                        Text("\(Int(v))")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(WH.Color.textSecondary)
-                    }
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: min(5, chartPoints.count))) { value in
-                AxisGridLine().foregroundStyle(WH.Color.separator.opacity(0.2))
-                AxisValueLabel {
-                    if let date = value.as(Date.self) {
-                        Text(shortDate(date))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(WH.Color.textSecondary)
-                    }
-                }
-            }
-        }
-        .chartLegend(.hidden)
-        .frame(height: 160)
     }
 
     private var legend: some View {
@@ -195,6 +117,190 @@ struct SleepCheckInCorrelationCard: View {
             }
         }
         return counts.sorted { $0.value > $1.value }
+    }
+}
+
+// MARK: - Custom dual-line chart (Swift Charts merges multi-series marks unpredictably)
+
+private struct CorrelationDualLineChart: View {
+    let points: [CorrelationPoint]
+    let xDomain: ClosedRange<Date>
+
+    private let yMin: Double = 0
+    private let yMax: Double = 100
+    private let leftPad: CGFloat = 26
+    private let bottomPad: CGFloat = 20
+    private let topPad: CGFloat = 6
+    private let rightPad: CGFloat = 4
+
+    var body: some View {
+        GeometryReader { geo in
+            let plot = plotRect(in: geo.size)
+            ZStack(alignment: .topLeading) {
+                Canvas { context, _ in
+                    drawGrid(context: &context, plot: plot)
+                    drawSeries(
+                        context: &context,
+                        plot: plot,
+                        values: points.map(\.feeling),
+                        color: WH.Color.sleepPurple,
+                        dashed: false
+                    )
+                    drawSeries(
+                        context: &context,
+                        plot: plot,
+                        values: points.map(\.recovery),
+                        color: WH.Color.recoveryGreen,
+                        dashed: true
+                    )
+                    drawPoints(
+                        context: &context,
+                        plot: plot,
+                        values: points.map(\.feeling),
+                        color: WH.Color.sleepPurple,
+                        filled: true,
+                        radius: 5
+                    )
+                    drawPoints(
+                        context: &context,
+                        plot: plot,
+                        values: points.map(\.recovery),
+                        color: WH.Color.recoveryGreen,
+                        filled: false,
+                        radius: 4.5
+                    )
+                }
+                yAxisLabels(plotHeight: plot.height)
+                    .padding(.leading, 2)
+                    .padding(.top, topPad)
+                xAxisLabels(plot: plot, fullWidth: geo.size.width)
+                    .padding(.top, plot.maxY + 2)
+            }
+        }
+    }
+
+    private func plotRect(in size: CGSize) -> CGRect {
+        CGRect(
+            x: leftPad,
+            y: topPad,
+            width: max(1, size.width - leftPad - rightPad),
+            height: max(1, size.height - topPad - bottomPad)
+        )
+    }
+
+    private func xPos(_ date: Date, plot: CGRect) -> CGFloat {
+        let span = xDomain.upperBound.timeIntervalSince1970 - xDomain.lowerBound.timeIntervalSince1970
+        guard span > 0 else { return plot.midX }
+        let t = (date.timeIntervalSince1970 - xDomain.lowerBound.timeIntervalSince1970) / span
+        return plot.minX + CGFloat(t) * plot.width
+    }
+
+    private func yPos(_ value: Double, plot: CGRect) -> CGFloat {
+        let clamped = min(yMax, max(yMin, value))
+        let t = (clamped - yMin) / (yMax - yMin)
+        return plot.maxY - CGFloat(t) * plot.height
+    }
+
+    private func drawGrid(context: inout GraphicsContext, plot: CGRect) {
+        for yVal in [0.0, 50.0, 100.0] {
+            let y = yPos(yVal, plot: plot)
+            var path = Path()
+            path.move(to: CGPoint(x: plot.minX, y: y))
+            path.addLine(to: CGPoint(x: plot.maxX, y: y))
+            context.stroke(path, with: .color(WH.Color.separator.opacity(0.4)), lineWidth: 0.5)
+        }
+        for date in xTickDates() {
+            let x = xPos(date, plot: plot)
+            var path = Path()
+            path.move(to: CGPoint(x: x, y: plot.minY))
+            path.addLine(to: CGPoint(x: x, y: plot.maxY))
+            context.stroke(path, with: .color(WH.Color.separator.opacity(0.2)), lineWidth: 0.5)
+        }
+    }
+
+    private func drawSeries(
+        context: inout GraphicsContext,
+        plot: CGRect,
+        values: [Double],
+        color: Color,
+        dashed: Bool
+    ) {
+        guard points.count >= 2 else { return }
+        var path = Path()
+        for (idx, pt) in points.enumerated() {
+            let point = CGPoint(x: xPos(pt.date, plot: plot), y: yPos(values[idx], plot: plot))
+            if idx == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        var style = StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+        if dashed { style.dash = [5, 4] }
+        context.stroke(path, with: .color(color), style: style)
+    }
+
+    private func drawPoints(
+        context: inout GraphicsContext,
+        plot: CGRect,
+        values: [Double],
+        color: Color,
+        filled: Bool,
+        radius: CGFloat
+    ) {
+        for (idx, pt) in points.enumerated() {
+            let center = CGPoint(x: xPos(pt.date, plot: plot), y: yPos(values[idx], plot: plot))
+            let rect = CGRect(
+                x: center.x - radius,
+                y: center.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            )
+            let circle = Path(ellipseIn: rect)
+            if filled {
+                context.fill(circle, with: .color(color))
+            } else {
+                context.fill(circle, with: .color(WH.Color.surface))
+                context.stroke(circle, with: .color(color), lineWidth: 2)
+            }
+        }
+    }
+
+    private func yAxisLabels(plotHeight: CGFloat) -> some View {
+        VStack {
+            Text("100")
+            Spacer()
+            Text("50")
+            Spacer()
+            Text("0")
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundStyle(WH.Color.textSecondary)
+        .frame(width: leftPad - 4, height: plotHeight, alignment: .trailing)
+    }
+
+    private func xAxisLabels(plot: CGRect, fullWidth: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(xTickDates(), id: \.timeIntervalSince1970) { date in
+                Text(shortDate(date))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(WH.Color.textSecondary)
+                    .fixedSize()
+                    .position(x: xPos(date, plot: plot), y: 8)
+            }
+        }
+        .frame(width: fullWidth, height: bottomPad - 2, alignment: .topLeading)
+    }
+
+    private func xTickDates() -> [Date] {
+        guard points.count >= 2 else { return points.map(\.date) }
+        let tickCount = min(5, points.count)
+        if tickCount == points.count { return points.map(\.date) }
+        let lastIdx = points.count - 1
+        return (0..<tickCount).map { i in
+            let idx = Int((Double(i) / Double(tickCount - 1)) * Double(lastIdx))
+            return points[idx].date
+        }
     }
 
     private func shortDate(_ date: Date) -> String {
