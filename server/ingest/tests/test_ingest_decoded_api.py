@@ -28,8 +28,11 @@ FULL_BODY = {
 
 PARTIAL_BODY = {
     "device": {"id": "devB"},
-    "streams": {"hr": [{"ts": 1, "bpm": 50}]},
+    "streams": {"hr": [{"ts": 1700000000, "bpm": 50}]},
 }
+
+_NO_SKIPS = {"hr": 0, "rr": 0, "events": 0, "battery": 0,
+             "spo2": 0, "skin_temp": 0, "resp": 0, "gravity": 0}
 
 # Type-47 V24 biometric payload — realistic values from the real on-device record.
 BIOMETRIC_BODY = {
@@ -67,7 +70,8 @@ def test_ingest_decoded_full(client):
     assert r.status_code == 200, r.text
     out = r.json()
     assert out == {"upserted": {"hr": 2, "rr": 1, "events": 1, "battery": 1,
-                                "spo2": 0, "skin_temp": 0, "resp": 0, "gravity": 0}}
+                                "spo2": 0, "skin_temp": 0, "resp": 0, "gravity": 0},
+                   "skipped": _NO_SKIPS}
 
 
 @requires_docker
@@ -104,7 +108,8 @@ def test_ingest_decoded_biometric_v24(client, clean_db):
     )
     assert r.status_code == 200, r.text
     assert r.json() == {"upserted": {"hr": 1, "rr": 0, "events": 0, "battery": 0,
-                                     "spo2": 1, "skin_temp": 1, "resp": 1, "gravity": 1}}
+                                     "spo2": 1, "skin_temp": 1, "resp": 1, "gravity": 1},
+                        "skipped": _NO_SKIPS}
     # Verify rows landed (read API doesn't expose these kinds; query DB directly).
     with psycopg.connect(clean_db) as conn, conn.cursor() as cur:
         cur.execute("SELECT red, ir FROM spo2_samples WHERE device_id='devA'")
@@ -127,4 +132,28 @@ def test_ingest_decoded_partial(client):
     )
     assert r.status_code == 200, r.text
     assert r.json() == {"upserted": {"hr": 1, "rr": 0, "events": 0, "battery": 0,
-                                     "spo2": 0, "skin_temp": 0, "resp": 0, "gravity": 0}}
+                                     "spo2": 0, "skin_temp": 0, "resp": 0, "gravity": 0},
+                        "skipped": _NO_SKIPS}
+
+
+@requires_docker
+def test_ingest_decoded_malformed_rows_dont_500(client):
+    """A batch mixing valid and malformed rows returns 200: valid rows persist,
+    malformed ones are reported in `skipped` (previously a KeyError → 500 wedged
+    the phone's retry loop on the same batch forever)."""
+    body = {
+        "device": {"id": "devB"},
+        "streams": {"hr": [
+            {"ts": 1700000000, "bpm": 55},
+            {"ts": 1700000001},               # missing bpm
+            {"ts": 1700000002000, "bpm": 60},  # ms-vs-seconds mistake
+        ]},
+    }
+    r = client.post("/v1/ingest-decoded", json=body,
+                    headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["upserted"]["hr"] == 1
+    assert out["skipped"]["hr"] == 2
+    hr = client.get("/v1/streams/hr", params={"device": "devB"}).json()
+    assert len(hr) == 1

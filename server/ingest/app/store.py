@@ -1,8 +1,28 @@
 """DB operations for the ingest pipeline. All upserts are idempotent so re-uploaded
 batches (store-and-forward retries) never duplicate rows."""
 import json
+import logging
+import time
 
 import psycopg
+
+_log = logging.getLogger("uvicorn.error")
+
+# Row-level ingest guards: one malformed row must not 500 the whole batch (the
+# phone retries the same batch forever and the sync pipeline wedges). The ts
+# window also catches ms-vs-seconds unit mistakes (a ms value lands in year
+# ~58000) without rejecting ordinary device-clock skew.
+_TS_MIN = 1577836800.0  # 2020-01-01 UTC
+
+
+def _row_ok(r: dict, required: tuple[str, ...]) -> bool:
+    for k in required:
+        if r.get(k) is None:
+            return False
+    ts = r["ts"]
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False
+    return _TS_MIN <= float(ts) <= time.time() + 86400.0
 
 
 def ensure_device(conn: psycopg.Connection, device_id: str, mac: str | None = None,
@@ -33,11 +53,18 @@ def insert_raw_batch(conn: psycopg.Connection, b: dict) -> None:
     )
 
 
-def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> dict:
+def upsert_streams(conn: psycopg.Connection, device_id: str,
+                   streams: dict) -> tuple[dict, dict]:
+    """Returns (upserted_counts, skipped_counts) per stream. Malformed rows
+    (missing required keys or implausible ts) are skipped, not fatal."""
     counts = {"hr": 0, "rr": 0, "events": 0, "battery": 0,
               "spo2": 0, "skin_temp": 0, "resp": 0, "gravity": 0}
+    skipped = dict.fromkeys(counts, 0)
     with conn.cursor() as cur:
         for r in streams.get("hr", []):
+            if not _row_ok(r, ("ts", "bpm")):
+                skipped["hr"] += 1
+                continue
             cur.execute(
                 """INSERT INTO hr_samples (device_id, ts, bpm)
                    VALUES (%s, to_timestamp(%s), %s)
@@ -45,6 +72,9 @@ def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> d
                 (device_id, r["ts"], r["bpm"]))
             counts["hr"] += 1
         for r in streams.get("rr", []):
+            if not _row_ok(r, ("ts", "rr_ms")):
+                skipped["rr"] += 1
+                continue
             cur.execute(
                 """INSERT INTO rr_intervals (device_id, ts, rr_ms)
                    VALUES (%s, to_timestamp(%s), %s)
@@ -52,6 +82,9 @@ def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> d
                 (device_id, r["ts"], r["rr_ms"]))
             counts["rr"] += 1
         for r in streams.get("events", []):
+            if not _row_ok(r, ("ts", "kind")):
+                skipped["events"] += 1
+                continue
             cur.execute(
                 """INSERT INTO events (device_id, ts, kind, payload)
                    VALUES (%s, to_timestamp(%s), %s, %s)
@@ -59,15 +92,25 @@ def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> d
                 (device_id, r["ts"], r["kind"], json.dumps(r.get("payload"))))
             counts["events"] += 1
         for r in streams.get("battery", []):
+            if not _row_ok(r, ("ts",)):
+                skipped["battery"] += 1
+                continue
+            # COALESCE: the decoded upload path omits `charging`; a re-upload of
+            # the same ts must not clobber a value the raw path already stored.
             cur.execute(
                 """INSERT INTO battery (device_id, ts, soc, mv, charging)
                    VALUES (%s, to_timestamp(%s), %s, %s, %s)
                    ON CONFLICT (device_id, ts) DO UPDATE SET
-                     soc = EXCLUDED.soc, mv = EXCLUDED.mv, charging = EXCLUDED.charging""",
+                     soc = COALESCE(EXCLUDED.soc, battery.soc),
+                     mv = COALESCE(EXCLUDED.mv, battery.mv),
+                     charging = COALESCE(EXCLUDED.charging, battery.charging)""",
                 (device_id, r["ts"], r.get("soc"), r.get("mv"), r.get("charging")))
             counts["battery"] += 1
         # Type-47 V24 biometric streams (raw ADC; cloud computes human units).
         for r in streams.get("spo2", []):
+            if not _row_ok(r, ("ts", "red", "ir")):
+                skipped["spo2"] += 1
+                continue
             cur.execute(
                 """INSERT INTO spo2_samples (device_id, ts, red, ir)
                    VALUES (%s, to_timestamp(%s), %s, %s)
@@ -75,6 +118,9 @@ def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> d
                 (device_id, r["ts"], r["red"], r["ir"]))
             counts["spo2"] += 1
         for r in streams.get("skin_temp", []):
+            if not _row_ok(r, ("ts", "raw")):
+                skipped["skin_temp"] += 1
+                continue
             cur.execute(
                 """INSERT INTO skin_temp_samples (device_id, ts, raw)
                    VALUES (%s, to_timestamp(%s), %s)
@@ -82,6 +128,9 @@ def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> d
                 (device_id, r["ts"], r["raw"]))
             counts["skin_temp"] += 1
         for r in streams.get("resp", []):
+            if not _row_ok(r, ("ts", "raw")):
+                skipped["resp"] += 1
+                continue
             cur.execute(
                 """INSERT INTO resp_samples (device_id, ts, raw)
                    VALUES (%s, to_timestamp(%s), %s)
@@ -89,13 +138,20 @@ def upsert_streams(conn: psycopg.Connection, device_id: str, streams: dict) -> d
                 (device_id, r["ts"], r["raw"]))
             counts["resp"] += 1
         for r in streams.get("gravity", []):
+            if not _row_ok(r, ("ts", "x", "y", "z")):
+                skipped["gravity"] += 1
+                continue
             cur.execute(
                 """INSERT INTO gravity_samples (device_id, ts, x, y, z)
                    VALUES (%s, to_timestamp(%s), %s, %s, %s)
                    ON CONFLICT (device_id, ts) DO UPDATE SET x = EXCLUDED.x, y = EXCLUDED.y, z = EXCLUDED.z""",
                 (device_id, r["ts"], r["x"], r["y"], r["z"]))
             counts["gravity"] += 1
-    return counts
+    total_skipped = sum(skipped.values())
+    if total_skipped:
+        _log.warning("upsert_streams %s: skipped %d malformed rows %s", device_id,
+                     total_skipped, {k: v for k, v in skipped.items() if v})
+    return counts, skipped
 
 
 # ── Derived daily-analysis upserts (Task 2.5) ────────────────────────────────

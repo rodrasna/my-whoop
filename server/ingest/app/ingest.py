@@ -43,7 +43,7 @@ def process_batch(conn: psycopg.Connection, cfg, batch: dict) -> dict:
             "packet_count": meta["packet_count"], "file_path": meta["file_path"],
             "sha256": meta["sha256"], "byte_size": meta["byte_size"],
         })
-        counts = store.upsert_streams(conn, device_id, streams)
+        counts, _ = store.upsert_streams(conn, device_id, streams)
     else:
         # archive-only: skip decode/upsert; use wall_ref as time bounds placeholder
         store.insert_raw_batch(conn, {

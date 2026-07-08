@@ -142,7 +142,10 @@ def _batch_dates_utc(streams: dict) -> set[_dt.date]:
             ts = r.get("ts")
             if ts is None:
                 continue
-            days.add(_dt.datetime.fromtimestamp(float(ts), _dt.timezone.utc).date())
+            try:
+                days.add(_dt.datetime.fromtimestamp(float(ts), _dt.timezone.utc).date())
+            except (TypeError, ValueError, OverflowError):
+                continue  # malformed ts — the upsert skipped this row too
     return days
 
 
@@ -154,7 +157,7 @@ def ingest_decoded(batch: DecodedBatch):
         store.ensure_device(conn, device_id,
                             mac=payload["device"].get("mac"),
                             name=payload["device"].get("name"))
-        counts = store.upsert_streams(conn, device_id, payload["streams"])
+        counts, skipped = store.upsert_streams(conn, device_id, payload["streams"])
         conn.commit()
         # Recompute the day(s) this batch touched — throttled (see _RECOMPUTE_*).
         # Best-effort: a compute error must NOT fail the ingest (the raw streams
@@ -174,7 +177,7 @@ def ingest_decoded(batch: DecodedBatch):
             finally:
                 _last_recompute[key] = time.monotonic()  # throttle successes AND failures
                 _recompute_lock.release()
-    return {"upserted": counts}
+    return {"upserted": counts, "skipped": skipped}
 
 
 @app.get("/v1/devices", dependencies=[Depends(require_auth)])
