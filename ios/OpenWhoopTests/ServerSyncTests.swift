@@ -837,4 +837,40 @@ final class ServerSyncTests: XCTestCase {
         XCTAssertEqual(json["session_kind"] as? String, "preWorkout")
         XCTAssertEqual(json["exercise_count"] as? Int, 8)
     }
+
+    // MARK: - single-flight gate (request-storm regression)
+
+    /// REGRESSION: BLEManager fires pull() from a 30s timer + every reconnect without awaiting
+    /// the previous run; stacked pulls re-read the same cursor and re-download identical pages
+    /// (observed live: ~27 GET /v1/streams/spo2 per minute against the ingest server). pull()
+    /// now single-flights through SingleFlightGate — this pins the gate's contract.
+    func testSingleFlightGateContract() async {
+        let gate = SingleFlightGate()
+        let first = await gate.tryAcquire()
+        XCTAssertTrue(first, "open gate must be acquirable")
+        let second = await gate.tryAcquire()
+        XCTAssertFalse(second, "gate must refuse a second concurrent acquire")
+        await gate.release()
+        let third = await gate.tryAcquire()
+        XCTAssertTrue(third, "released gate must be acquirable again")
+        await gate.release()
+    }
+
+    /// A pull() that loses the gate race is a clean no-op; back-to-back sequential pulls must
+    /// BOTH run (the gate is released between them), so normal 30s-cadence operation is unaffected.
+    func testSequentialPullsBothRun() async throws {
+        StubURLProtocol.reset(bodies: ["/v1/streams": "[]", "/v1/daily": "[]", "/v1/sleep": "[]"])
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        await sync.pull()
+        let firstCount = StubURLProtocol.captured.count
+        XCTAssertGreaterThan(firstCount, 0, "first pull must issue requests")
+
+        await sync.pull()
+        XCTAssertGreaterThan(StubURLProtocol.captured.count, firstCount,
+                             "a sequential second pull must run (gate was released)")
+    }
 }

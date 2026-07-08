@@ -121,6 +121,7 @@ final class Uploader {
                 var d: [String: Any] = ["ts": b.ts]
                 if let soc = b.soc { d["soc"] = soc }
                 if let mv = b.mv { d["mv"] = mv }
+                if let charging = b.charging { d["charging"] = charging }
                 return d
             },
             mark: { try await self.store.markBatterySynced(deviceId: self.deviceId, rows: $0) })

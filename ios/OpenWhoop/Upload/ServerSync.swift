@@ -45,9 +45,20 @@ final class ServerSync {
         self.session = session
     }
 
+    /// Single-flight gate for pull()/restoreIfEmpty(). BLEManager fires pull() from a 30 s
+    /// repeating timer and on every (re)connect WITHOUT awaiting the previous run, so a pull
+    /// that outlives one timer tick (multi-page backlog, slow network) stacks concurrent pulls:
+    /// each re-reads the same cursor, re-downloads the same pages, and the server sees a
+    /// sustained request storm (observed: ~27 GET/min re-fetching identical spo2 pages).
+    /// A loser of the race skips its run entirely — the in-flight pull plus the next timer
+    /// tick always cover whatever it would have fetched.
+    private let pullGate = SingleFlightGate()
+
     func pull() async {
+        guard await pullGate.tryAcquire() else { return }
         await pullDecoded()
         await pullDerived()
+        await pullGate.release()
     }
 
     // MARK: - Cloud restore (fresh reinstall)
@@ -85,10 +96,15 @@ final class ServerSync {
     @discardableResult
     func restoreIfEmpty() async -> Bool {
         guard await isDecodedStoreEmpty() else { return false }
+        // Shares pull()'s single-flight gate: a restore racing a timer pull would page the same
+        // streams twice. If the gate is busy the restore is skipped — the store is empty, so the
+        // in-flight incremental pull starts from cursor-less from=0 and fetches the same streams.
+        guard await pullGate.tryAcquire() else { return false }
         // Full decoded restore: page all streams from ts=0, ignoring any cursor.
         await pullDecodedFull()
         // Full derived restore: wider window than the normal incremental 60-day window.
         await pullDerivedFull()
+        await pullGate.release()
         return true
     }
 
@@ -1190,4 +1206,23 @@ struct Workout: Identifiable, Equatable {
     let caloriesKj: Double?
     let motionVar: Double?           // variance of motion intensity over the bout
     let hrPeaksPerMin: Double?       // HR surges per minute (interval-structure proxy)
+}
+
+// MARK: - SingleFlightGate
+
+/// Data-race-free "is a run already in flight?" flag. `tryAcquire` returns false instead of
+/// waiting, so a caller that loses the race skips its run entirely (the winner covers it).
+/// Internal (not fileprivate) so tests can exercise the acquire/release contract directly.
+actor SingleFlightGate {
+    private var active = false
+
+    /// Returns true and closes the gate if it was open; false if a run is already in flight.
+    /// A successful acquire MUST be paired with `release()`.
+    func tryAcquire() -> Bool {
+        guard !active else { return false }
+        active = true
+        return true
+    }
+
+    func release() { active = false }
 }

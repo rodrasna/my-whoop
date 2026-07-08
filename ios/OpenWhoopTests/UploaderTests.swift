@@ -439,6 +439,38 @@ final class UploaderTests: XCTestCase {
         XCTAssertEqual(gravRows?[0]["z"] as? Double, 9.8)
     }
 
+    // MARK: - battery payload carries charging when known
+
+    /// REGRESSION: the battery encode used to omit `charging` entirely, so a decoded re-upload
+    /// of the same ts clobbered a charging value the server already had (before the server-side
+    /// COALESCE fix). The flag must be sent when the local row knows it, and omitted when nil.
+    func testDrainPostsBatteryChargingWhenPresent() async throws {
+        StubURLProtocol.reset(responses: ["/v1/ingest-decoded": 200])
+
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "devA", mac: nil, name: nil)
+        let streams = Streams(
+            battery: [BatterySample(ts: 6000, soc: 55.5, mv: 3900, charging: true),
+                      BatterySample(ts: 6001, soc: 55.0, mv: nil)]   // charging unknown
+        )
+        try await store.insert(streams, deviceId: "devA")
+
+        let uploader = Uploader(config: makeConfig(), store: store,
+                                deviceId: "devA", session: makeSession())
+        await uploader.drain()
+
+        let batteryRows = StubURLProtocol.captured.compactMap { req -> [[String: Any]]? in
+            guard let json = req.bodyJSON as? [String: Any],
+                  let ss = json["streams"] as? [String: Any] else { return nil }
+            return ss["battery"] as? [[String: Any]]
+        }.first
+        XCTAssertEqual(batteryRows?.count, 2)
+        XCTAssertEqual(batteryRows?[0]["ts"] as? Int, 6000)
+        XCTAssertEqual(batteryRows?[0]["charging"] as? Bool, true)
+        XCTAssertEqual(batteryRows?[1]["ts"] as? Int, 6001)
+        XCTAssertNil(batteryRows?[1]["charging"], "unknown charging must be omitted, not sent as null")
+    }
+
     // MARK: - drain() never POSTs raw by default
 
     func testDrainDoesNotPostRawByDefault() async throws {
