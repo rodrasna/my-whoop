@@ -217,3 +217,31 @@ Manual verification steps for E4 (state restoration) and E6 (storage counter).
 
 - **Stale clock on mid-session strap reboot**: `clockRef` is captured once and reused across same-process reconnects (correct while the strap stays powered). If the strap reboots/clock-resets mid-session, REALTIME_DATA timestamps would be mis-correlated until the next app relaunch. Acceptable for v1; revisit if strap-reboot detection is added.
 - **Battery under-sampling within a session**: COMMAND_RESPONSE battery readings carry no device timestamp, so all are stamped at `wallClockRef`; with the `battery` PK `(deviceId, ts)` + ON CONFLICT DO NOTHING, multiple battery reads in one clock-correlation collapse to one row. Battery is slow-changing so this is mostly cosmetic; revisit if finer battery history is needed.
+
+## 12. Limitaciones conocidas del pipeline de datos (server) — auditoría 2026-07-07
+
+Revisión de integridad de datos (auditoría de la DB real + revisión de código). Se documentan
+como decisiones razonadas, NO como bugs pendientes:
+
+- **Bucketing por día UTC en todo el pipeline** (`daily.py` construye ventanas
+  `[día 00:00 UTC, día+1 00:00 UTC)`): en Madrid (UTC+1/+2) solo desalinea actividad entre las
+  00:00–02:00 locales. Un refactor a timezone local tocaría daily/sleep/exercise/read y no está
+  justificado por ese margen.
+- **Entreno que cruza la medianoche UTC** (02:00 locales en verano) se parte en dos bouts, uno
+  por cada `compute_day`. Raro en la práctica; consecuencia directa del bucketing UTC.
+- **PK de `rr_intervals` `(device_id, ts, rr_ms)`**: dos latidos del mismo segundo con `rr_ms`
+  idéntico colapsan en una fila. Impacto mínimo donde la VFC importa (sueño, FC baja, <1 latido/s).
+- **`WINDOW_EDGE_MARGIN_S = 90` en `sleep.py`**: una sesión que termina a <90 s del fin de la
+  ventana de lectura se descarta como artefacto de borde (documentado en el propio código). Solo
+  afectaría a siestas que terminan pegadas a la medianoche UTC.
+- **El single-flight/debounce de recompute en `main.py` es por proceso** (`threading.Lock` +
+  dict en memoria). Correcto con el uvicorn actual (1 worker, ver Dockerfile). NO escalar a
+  `--workers N` sin sustituirlo por un lock global (advisory lock de Postgres), o dos workers
+  podrán ejecutar `compute_day` concurrentes y duplicar `exercise_sessions` (delete-then-insert
+  con detecciones ligeramente distintas).
+
+Corregido en esta auditoría (2026-07-07): upsert de `battery` con COALESCE (una re-subida sin
+`charging` ya no lo machaca a NULL) + el Uploader iOS ya envía `charging`; validación por fila en
+`/v1/ingest-decoded` (fila malformada → se salta y se cuenta en `skipped`, antes 500 que atascaba
+el retry del teléfono); single-flight en `ServerSync.pull()` iOS (tormenta de GETs por pulls
+apilados del timer de 30 s).
