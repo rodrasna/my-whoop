@@ -98,6 +98,7 @@ enum MetricKind: String, Identifiable {
         switch self {
         case .recovery: return 0...100
         case .strain:   return 0...21
+        case .sleepDuration: return 0...12
         case .spo2:     return 90...100
         case .rawHR:    return nil
         default:        return nil

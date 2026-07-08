@@ -627,6 +627,52 @@ final class ServerSyncTests: XCTestCase {
         XCTAssertTrue(workouts.isEmpty, "should return [] on 500")
     }
 
+    func testGetWorkoutsFromEpochUsesEpochQuery() async throws {
+        let body = """
+        [{
+            "device_id": "my-whoop",
+            "start_ts": 1770000100,
+            "end_ts": 1770001900,
+            "avg_hr": 122,
+            "peak_hr": 155,
+            "strain": 8.4,
+            "duration_s": 1800
+        }]
+        """
+        StubURLProtocol.reset(bodiesByQuery: ["from_ts=1770000000&to_ts=1770086400": body])
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let workouts = await sync.getWorkouts(fromEpoch: 1_770_000_000, toEpoch: 1_770_086_400)
+
+        XCTAssertEqual(workouts.count, 1)
+        XCTAssertEqual(workouts[0].startTs, 1_770_000_100)
+        let req = StubURLProtocol.captured.first { $0.url.path.hasSuffix("/v1/workouts") }
+        XCTAssertEqual(req?.url.query?.contains("from_ts=1770000000"), true)
+        XCTAssertEqual(req?.url.query?.contains("to_ts=1770086400"), true)
+    }
+
+    func testGetWorkoutsFromEpochFallsBackToDayQueryOnUnsupportedServer() async throws {
+        StubURLProtocol.reset(
+            responses: ["/v1/workouts": 400],
+            bodies: [:]
+        )
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "my-whoop", mac: nil, name: nil)
+        let sync = ServerSync(config: makeConfig(), store: store,
+                              deviceId: "my-whoop", session: makeSession())
+
+        let workouts = await sync.getWorkouts(fromEpoch: 1_770_000_000, toEpoch: 1_770_086_400)
+
+        XCTAssertTrue(workouts.isEmpty)
+        XCTAssertEqual(StubURLProtocol.captured.count, 2)
+        XCTAssertEqual(StubURLProtocol.captured[0].url.query?.contains("from_ts=1770000000"), true)
+        XCTAssertEqual(StubURLProtocol.captured[1].url.query?.contains("from=2026-02-02"), true)
+        XCTAssertEqual(StubURLProtocol.captured[1].url.query?.contains("to=2026-02-02"), true)
+    }
+
     // MARK: - getHRSeries (downsampled single-request, for raw HR card)
 
     /// Verifies that getHRSeries correctly decodes a JSON array of {ts, bpm} rows,

@@ -1169,9 +1169,10 @@ struct WorkoutsView: View {
 
         let strainBeforeBackfill = strainForSelectedDayIgnoringActivities()
         let serverCount = serverExerciseCount(for: dayKey) ?? 0
+        let shouldBackfillSelectedDay = ((strainBeforeBackfill ?? 0) > 0) || serverCount > 0
         if dayList.filter({ isOnSelectedDay($0.startTs) }).isEmpty,
            metrics.isServerConfigured,
-           (strainBeforeBackfill ?? 0) > 0 || serverCount > 0 {
+           shouldBackfillSelectedDay {
             _ = await metrics.backfillWorkouts(from: prevKey, to: dayKey)
             dayList = await loadDayWorkouts()
             replaceWorkouts(forSelectedDay: dayList)

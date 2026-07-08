@@ -58,7 +58,7 @@ struct TrendChartCard: View {
             MetricChart(
                 series: points,
                 kind: kind,
-                showAxes: true,
+                showAxes: false,
                 showSelection: true,
                 yDomain: kind.fixedYDomain,
                 selected: $selected
