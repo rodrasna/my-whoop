@@ -186,9 +186,12 @@ enum WeeklyChartBuilder {
         return (0..<span).compactMap { offset -> WeeklyBarPoint? in
             guard let day = calendar.date(byAdding: .day, value: -(span - 1 - offset), to: end) else { return nil }
             let key = MetricsRepository.localDayString(for: day, calendar: calendar)
+            let utcKey = MetricsRepository.utcDayString(for: day, calendar: calendar)
             let wd = weekdayFmt.string(from: day).lowercased().prefix(3)
             let dom = calendar.component(.day, from: day)
-            let v = byDay[key].flatMap { value($0) } ?? 0
+            let v = byDay[key].flatMap { value($0) }
+                ?? (utcKey != key ? byDay[utcKey].flatMap { value($0) } : nil)
+                ?? 0
             return WeeklyBarPoint(
                 id: key,
                 weekday: String(wd),

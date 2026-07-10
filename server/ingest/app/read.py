@@ -503,6 +503,17 @@ def query_exercises_for_day(conn, device_id, day) -> list:
     ]
 
 
+def _workout_row_to_api_dict(row: dict) -> dict:
+    """Serialize a ``query_workouts*`` row for JSON (epoch seconds, string zone keys)."""
+    d = dict(row)
+    d["start_ts"] = _timestamp_to_epoch(d["start_ts"])
+    d["end_ts"] = _timestamp_to_epoch(d["end_ts"])
+    zt = d.get("zone_time_pct")
+    if zt is not None:
+        d["zone_time_pct"] = {str(k): v for k, v in zt.items()}
+    return d
+
+
 def query_workouts(conn, device_id, start_date, end_date):
     """Exercise sessions for a device whose start_ts (UTC date) is in
     [start_date, end_date] (inclusive). start_date/end_date are datetime.date
@@ -515,7 +526,7 @@ def query_workouts(conn, device_id, start_date, end_date):
         "ORDER BY start_ts",
         (device_id, start_date, end_date),
     ).fetchall()
-    return [dict(zip(_WORKOUT_COLS, r)) for r in rows]
+    return [_workout_row_to_api_dict(dict(zip(_WORKOUT_COLS, r))) for r in rows]
 
 
 def query_workouts_epoch(conn, device_id, start_ts: float, end_ts: float):
@@ -531,7 +542,7 @@ def query_workouts_epoch(conn, device_id, start_ts: float, end_ts: float):
         "ORDER BY start_ts",
         (device_id, start_ts, end_ts),
     ).fetchall()
-    return [dict(zip(_WORKOUT_COLS, r)) for r in rows]
+    return [_workout_row_to_api_dict(dict(zip(_WORKOUT_COLS, r))) for r in rows]
 
 
 _STRESS_COLS = ["device_id", "ts", "score", "rmssd_ms", "hr_bpm", "motion_var", "quality"]

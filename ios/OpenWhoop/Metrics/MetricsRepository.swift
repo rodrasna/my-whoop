@@ -624,6 +624,20 @@ final class MetricsRepository: ObservableObject {
         return await serverSync?.getWorkouts(fromEpoch: fromEpoch, toEpoch: toEpoch) ?? []
     }
 
+    /// Workouts in local calendar days [endingOn − daysBack, endingOn] (inclusive).
+    /// Uses epoch bounds so midnight–02:00 local (Madrid) is not dropped vs UTC date queries.
+    func workouts(lastDays daysBack: Int, endingOn date: Date = Date(), calendar: Calendar = .current) async -> [Workout] {
+        let end = calendar.startOfDay(for: date)
+        guard let from = calendar.date(byAdding: .day, value: -daysBack, to: end),
+              let toExclusive = calendar.date(byAdding: .day, value: 1, to: end) else {
+            return []
+        }
+        return await workouts(
+            fromEpoch: Int(from.timeIntervalSince1970),
+            toEpoch: Int(toExclusive.timeIntervalSince1970)
+        )
+    }
+
     /// Ventanas de estrés intradía (servidor) para un día calendario local.
     func stressPoints(for day: Date) async -> [StressPoint] {
         await ensureOpen()

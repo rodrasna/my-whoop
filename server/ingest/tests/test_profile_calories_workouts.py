@@ -443,7 +443,10 @@ def test_get_workouts_epoch_window(client, clean_db):
         params={"device": "devWE", "from_ts": int(T0) - 10, "to_ts": int(T0) + 3600},
     )
     assert r.status_code == 200
-    assert len(r.json()) == 1
+    rows = r.json()
+    assert len(rows) == 1
+    assert isinstance(rows[0]["start_ts"], (int, float))
+    assert abs(rows[0]["start_ts"] - T0) < 1.0
 
 
 @requires_docker

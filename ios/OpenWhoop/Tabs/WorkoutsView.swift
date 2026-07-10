@@ -293,16 +293,25 @@ struct WorkoutsView: View {
     }
 
     private func serverExerciseCount(for dayKey: String) -> Int? {
-        if isViewingToday, metrics.today?.day == dayKey, let c = metrics.today?.exerciseCount {
-            return c
+        // Daily rows use UTC day keys from the server; local day usually matches (CET) but not 00:00–02:00.
+        let utcKey = MetricsRepository.utcDayString(for: selectedDate)
+        let keys = dayKey == utcKey ? [dayKey] : [dayKey, utcKey]
+        var best: Int?
+        for key in keys {
+            if isViewingToday, metrics.today?.day == key, let c = metrics.today?.exerciseCount {
+                best = max(best ?? 0, c)
+            }
+            if selectedDayMetric?.day == key, let c = selectedDayMetric?.exerciseCount {
+                best = max(best ?? 0, c)
+            }
+            if let c = weekRows.first(where: { $0.day == key })?.exerciseCount {
+                best = max(best ?? 0, c)
+            }
+            if let c = strainChartRows.first(where: { $0.day == key })?.exerciseCount {
+                best = max(best ?? 0, c)
+            }
         }
-        if selectedDayMetric?.day == dayKey, let c = selectedDayMetric?.exerciseCount {
-            return c
-        }
-        if let c = weekRows.first(where: { $0.day == dayKey })?.exerciseCount {
-            return c
-        }
-        return strainChartRows.first(where: { $0.day == dayKey })?.exerciseCount
+        return best
     }
 
     private var isViewingToday: Bool {
@@ -1090,12 +1099,17 @@ struct WorkoutsView: View {
 
     private var selectedDayStrain: Double? {
         let key = MetricsRepository.localDayString(for: selectedDate)
-        var strain = weekRows.first(where: { $0.day == key })?.strain
-        if strain == nil || strain == 0 {
-            if isViewingToday, metrics.today?.day == key, let t = metrics.today?.strain, t > 0 {
-                strain = t
-            } else if selectedDayMetric?.day == key, let s = selectedDayMetric?.strain, s > 0 {
-                strain = s
+        let utcKey = MetricsRepository.utcDayString(for: selectedDate)
+        let keys = key == utcKey ? [key] : [key, utcKey]
+        var strain: Double?
+        for k in keys {
+            if let s = weekRows.first(where: { $0.day == k })?.strain, s > 0 {
+                strain = max(strain ?? 0, s)
+            }
+            if isViewingToday, metrics.today?.day == k, let t = metrics.today?.strain, t > 0 {
+                strain = max(strain ?? 0, t)
+            } else if selectedDayMetric?.day == k, let s = selectedDayMetric?.strain, s > 0 {
+                strain = max(strain ?? 0, s)
             }
         }
         if strain == nil || strain == 0 {
@@ -1110,8 +1124,7 @@ struct WorkoutsView: View {
         errorMessage = nil
         await metrics.refresh()
         sleepNights = await metrics.sleepNightCount()
-        let (from, to) = dateRange(daysBack: 30)
-        let fetched = await metrics.workouts(from: from, to: to)
+        let fetched = await metrics.workouts(lastDays: 30)
         workouts = fetched
         await reloadWeekRows()
         await reloadStrainChartRows()
@@ -1146,9 +1159,12 @@ struct WorkoutsView: View {
 
         let cal = Calendar.current
         let dayKey = MetricsRepository.localDayString(for: selectedDate)
-        let prevKey = MetricsRepository.localDayString(
-            for: cal.date(byAdding: .day, value: -1, to: selectedDate) ?? selectedDate
-        )
+        let prevDate = cal.date(byAdding: .day, value: -1, to: selectedDate) ?? selectedDate
+        let prevKey = MetricsRepository.localDayString(for: prevDate)
+        let utcKey = MetricsRepository.utcDayString(for: selectedDate)
+        let utcPrevKey = MetricsRepository.utcDayString(for: prevDate)
+        let backfillFrom = min(prevKey, utcPrevKey)
+        let backfillTo = max(dayKey, utcKey)
         let startOfDay = cal.startOfDay(for: selectedDate)
         guard let endOfDay = cal.date(byAdding: .day, value: 1, to: startOfDay) else { return }
         let fromTs = Int(startOfDay.timeIntervalSince1970)
@@ -1173,7 +1189,7 @@ struct WorkoutsView: View {
         if dayList.filter({ isOnSelectedDay($0.startTs) }).isEmpty,
            metrics.isServerConfigured,
            shouldBackfillSelectedDay {
-            _ = await metrics.backfillWorkouts(from: prevKey, to: dayKey)
+            _ = await metrics.backfillWorkouts(from: backfillFrom, to: backfillTo)
             dayList = await loadDayWorkouts()
             replaceWorkouts(forSelectedDay: dayList)
         }
@@ -1187,11 +1203,20 @@ struct WorkoutsView: View {
     /// Strain del día sin inferirlo desde actividades (para decidir backfill).
     private func strainForSelectedDayIgnoringActivities() -> Double? {
         let key = MetricsRepository.localDayString(for: selectedDate)
-        if isViewingToday, metrics.today?.day == key, let t = metrics.today?.strain, t > 0 {
-            return t
+        let utcKey = MetricsRepository.utcDayString(for: selectedDate)
+        let keys = key == utcKey ? [key] : [key, utcKey]
+        for k in keys {
+            if isViewingToday, metrics.today?.day == k, let t = metrics.today?.strain, t > 0 {
+                return t
+            }
+            if selectedDayMetric?.day == k, let s = selectedDayMetric?.strain, s > 0 {
+                return s
+            }
+            if let s = weekRows.first(where: { $0.day == k })?.strain, s > 0 {
+                return s
+            }
         }
-        if let s = selectedDayMetric?.strain, s > 0 { return s }
-        return weekRows.first(where: { $0.day == key })?.strain
+        return nil
     }
 
     private func replaceWorkouts(forSelectedDay dayList: [Workout]) {
@@ -1209,15 +1234,6 @@ struct WorkoutsView: View {
         return selectedDayMetric?.restingHr ?? weekRows.first { $0.day == key }?.restingHr
     }
 
-    private func dateRange(daysBack: Int) -> (from: String, to: String) {
-        let cal = Calendar.current
-        let today = cal.startOfDay(for: Date())
-        let from = cal.date(byAdding: .day, value: -daysBack, to: today) ?? today
-        return (
-            MetricsRepository.localDayString(for: from, calendar: cal),
-            MetricsRepository.localDayString(for: today, calendar: cal)
-        )
-    }
 
     // MARK: - Formatting
 
