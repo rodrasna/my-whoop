@@ -283,11 +283,8 @@ final class Uploader {
 /// Detects HR rows marked uploaded locally but missing on the server, and resets them.
 enum StrandedUploadRecovery {
     private static let minLocalHR = 5_000
-    /// Only check the recent window — older server HR (e.g. Jul 9) must not block recovery
-    /// when Jul 10+ never uploaded.
-    private static let gapLookbackSeconds: TimeInterval = 36 * 3600
-    /// Stranded when local store is large but the server received almost nothing recently.
-    private static let maxRecentServerHR = 500
+    /// HR outage began ~Jul 10 2026 — compare server fill since then vs local store size.
+    private static let gapEpochStart = 1_783_634_400
 
     static func recoverIfNeeded(store: WhoopStore,
                                 config: UploaderConfig,
@@ -295,26 +292,38 @@ enum StrandedUploadRecovery {
         guard let stats = try? await store.hrUploadStats(deviceId: deviceId) else { return false }
         guard stats.total >= minLocalHR, stats.pending == 0 else { return false }
 
-        let recentServerHR = await serverHRCount(config: config,
+        let now = Int(Date().timeIntervalSince1970)
+        let serverSinceGap = await serverHRCount(config: config,
                                                deviceId: deviceId,
-                                               lookbackSeconds: gapLookbackSeconds)
-        guard recentServerHR >= 0, recentServerHR < maxRecentServerHR else { return false }
+                                               from: gapEpochStart,
+                                               to: now)
+        guard serverSinceGap >= 0 else { return false }
+        let threshold = max(10_000, stats.total / 20)
+        guard serverSinceGap < threshold else { return false }
 
+        return await resetAndLog(store: store, deviceId: deviceId,
+                                 reason: "server since gap=\(serverSinceGap) local=\(stats.total)")
+    }
+
+    static func forceReset(store: WhoopStore, deviceId: String) async -> Bool {
+        await resetAndLog(store: store, deviceId: deviceId, reason: "manual force")
+    }
+
+    private static func resetAndLog(store: WhoopStore, deviceId: String, reason: String) async -> Bool {
         let reset = (try? await store.resetBiometricStreamSyncFlags(deviceId: deviceId)) ?? 0
         if reset > 0 {
-            print("StrandedUploadRecovery: reset \(reset) biometric rows (server HR last 36h=\(recentServerHR))")
+            print("StrandedUploadRecovery: reset \(reset) rows (\(reason))")
         }
         return reset > 0
     }
 
     private static func serverHRCount(config: UploaderConfig,
                                       deviceId: String,
-                                      lookbackSeconds: TimeInterval) async -> Int {
-        let now = Int(Date().timeIntervalSince1970)
-        let from = now - Int(lookbackSeconds)
-        guard let url = URL(string: "/v1/summary?device=\(deviceId)&from=\(from)&to=\(now)",
+                                      from: Int,
+                                      to: Int) async -> Int {
+        guard let url = URL(string: "/v1/summary?device=\(deviceId)&from=\(from)&to=\(to)",
                             relativeTo: config.baseURL)
-                ?? URL(string: "\(config.baseURL.absoluteString)/v1/summary?device=\(deviceId)&from=\(from)&to=\(now)")
+                ?? URL(string: "\(config.baseURL.absoluteString)/v1/summary?device=\(deviceId)&from=\(from)&to=\(to)")
         else { return -1 }
 
         var request = URLRequest(url: url)

@@ -185,6 +185,25 @@ public final class BLEManager: NSObject, ObservableObject {
             store: store, config: cfg, deviceId: deviceId)
         if recovered {
             log("Upload recovery: reset stranded biometric rows — starting drain")
+        }
+        await drainPendingUploadsIfAny()
+    }
+
+    /// Force all biometric rows back to pending upload (Device tab manual recovery).
+    func forceReuploadBiometrics() async {
+        guard let store = whoopStore else {
+            log("Force re-upload: store not ready")
+            return
+        }
+        let ok = await StrandedUploadRecovery.forceReset(store: store, deviceId: deviceId)
+        log(ok ? "Force re-upload: rows reset — draining" : "Force re-upload: nothing to reset")
+        await drainPendingUploadsIfAny()
+    }
+
+    private func drainPendingUploadsIfAny() async {
+        guard let store = whoopStore else { return }
+        if let stats = try? await store.hrUploadStats(deviceId: deviceId), stats.pending > 0 {
+            log("Upload drain: \(stats.pending) HR rows pending")
             uploadOpportunistically()
         }
     }
@@ -235,11 +254,11 @@ public final class BLEManager: NSObject, ObservableObject {
         Task { @MainActor in await collector?.prune() }
     }
 
-    /// Light storage summary for the UI (decoded rows, raw batches, raw bytes, pending HR). nil without a store.
-    public func storageStats() async -> (decodedRows: Int, rawBatches: Int, rawBytes: Int, pendingHR: Int)? {
+    /// Light storage summary for the UI (decoded rows, raw batches, raw bytes, HR pending). nil without a store.
+    public func storageStats() async -> (decodedRows: Int, rawBatches: Int, rawBytes: Int, hrTotal: Int, pendingHR: Int)? {
         guard let base = await collector?.storageStats() else { return nil }
-        let pending = (try? await whoopStore?.hrUploadStats(deviceId: deviceId).pending) ?? 0
-        return (base.decodedRows, base.rawBatches, base.rawBytes, pending)
+        let hr = (try? await whoopStore?.hrUploadStats(deviceId: deviceId)) ?? (0, 0)
+        return (base.decodedRows, base.rawBatches, base.rawBytes, hr.total, hr.pending)
     }
 
     /// Capture raw accelerometer (type-43 IMU) frames on demand for a bounded window, then stop.

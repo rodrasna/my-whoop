@@ -169,13 +169,17 @@ public final class LiveViewModel: ObservableObject {
     /// User tapped "Sync now" — force an offload regardless of the periodic floor.
     public func syncNow() { ble.requestSync(.manual) }
 
+    public func forceReupload() {
+        Task { await ble.forceReuploadBiometrics() }
+    }
+
     /// Refresh the storage summary line from the store (polled every few seconds by LiveView).
     public func refreshStorage() {
         Task { @MainActor in
             guard let s = await ble.storageStats() else { storageSummary = "stored: —"; return }
             let mb = Double(s.rawBytes) / (1024 * 1024)
-            storageSummary = String(format: "stored: %d · pending upload: %d · %d raw · %.1f MB",
-                                    s.decodedRows, s.pendingHR, s.rawBatches, mb)
+            storageSummary = String(format: "HR %d almac · %d pend · total %d · %.1f MB raw",
+                                    s.hrTotal, s.pendingHR, s.decodedRows, mb)
         }
     }
 }

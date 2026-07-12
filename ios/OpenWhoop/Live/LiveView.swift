@@ -338,6 +338,10 @@ private struct LiveContentView: View {
                                   accent: WH.Color.teal, prominent: false) {
                         model.syncNow()
                     }
+                    consoleButton("Re-subir FC", icon: "icloud.and.arrow.up",
+                                  accent: WH.Color.recoveryYellow, prominent: false) {
+                        model.forceReupload()
+                    }
                 }
             }
         }
