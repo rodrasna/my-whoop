@@ -193,6 +193,7 @@ final class Uploader {
         request.httpMethod = "POST"
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             return IngestResult(ok: false, skippedForKey: 0)
         }
@@ -273,6 +274,52 @@ final class Uploader {
             return (200..<300).contains(http.statusCode)
         } catch {
             return false
+        }
+    }
+}
+
+// MARK: - Stranded upload recovery
+
+/// Detects HR rows marked uploaded locally but missing on the server, and resets them.
+enum StrandedUploadRecovery {
+    private static let minLocalHR = 5_000
+    private static let lookbackSeconds: TimeInterval = 72 * 3600
+
+    static func recoverIfNeeded(store: WhoopStore,
+                                config: UploaderConfig,
+                                deviceId: String) async -> Bool {
+        guard let stats = try? await store.hrUploadStats(deviceId: deviceId) else { return false }
+        guard stats.total >= minLocalHR, stats.pending == 0 else { return false }
+
+        let serverHR = await recentServerHRCount(config: config, deviceId: deviceId)
+        guard serverHR == 0 else { return false }
+
+        let reset = (try? await store.resetBiometricStreamSyncFlags(deviceId: deviceId)) ?? 0
+        if reset > 0 {
+            print("StrandedUploadRecovery: reset \(reset) biometric rows for re-upload")
+        }
+        return reset > 0
+    }
+
+    private static func recentServerHRCount(config: UploaderConfig, deviceId: String) async -> Int {
+        let now = Int(Date().timeIntervalSince1970)
+        let from = now - Int(lookbackSeconds)
+        guard let url = URL(string: "/v1/summary?device=\(deviceId)&from=\(from)&to=\(now)",
+                            relativeTo: config.baseURL)
+                ?? URL(string: "\(config.baseURL.absoluteString)/v1/summary?device=\(deviceId)&from=\(from)&to=\(now)")
+        else { return -1 }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 20
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let hr = obj["hr"] as? NSNumber else { return -1 }
+            return hr.intValue
+        } catch {
+            return -1
         }
     }
 }

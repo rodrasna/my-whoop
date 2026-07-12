@@ -156,4 +156,20 @@ final class SyncedFlagTests: XCTestCase {
         let batZ = try await store.unsyncedBattery(deviceId: dev, limit: 10).count
         XCTAssertEqual([hrZ, rrZ, spo2Z, skinZ, respZ, gravZ, evZ, batZ], [0, 0, 0, 0, 0, 0, 0, 0])
     }
+
+    func testResetBiometricStreamSyncFlags() async throws {
+        let store = try await freshStore()
+        try await store.insert(Streams(
+            hr: [HRSample(ts: 1, bpm: 60)],
+            rr: [RRInterval(ts: 1, rrMs: 800)],
+            spo2: [SpO2Sample(ts: 1, red: 1, ir: 2)]
+        ), deviceId: dev, markSynced: true)
+        let before = try await store.unsyncedHR(deviceId: dev, limit: 10)
+        XCTAssertTrue(before.isEmpty)
+
+        let reset = try await store.resetBiometricStreamSyncFlags(deviceId: dev)
+        XCTAssertEqual(reset, 3)
+        let after = try await store.unsyncedHR(deviceId: dev, limit: 10)
+        XCTAssertEqual(after.count, 1)
+    }
 }

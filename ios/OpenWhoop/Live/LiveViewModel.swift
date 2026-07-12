@@ -174,8 +174,8 @@ public final class LiveViewModel: ObservableObject {
         Task { @MainActor in
             guard let s = await ble.storageStats() else { storageSummary = "stored: —"; return }
             let mb = Double(s.rawBytes) / (1024 * 1024)
-            storageSummary = String(format: "stored: %d samples · %d raw batches · %.1f MB",
-                                    s.decodedRows, s.rawBatches, mb)
+            storageSummary = String(format: "stored: %d · pending upload: %d · %d raw · %.1f MB",
+                                    s.decodedRows, s.pendingHR, s.rawBatches, mb)
         }
     }
 }

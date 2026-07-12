@@ -26,6 +26,7 @@ public final class BLEManager: NSObject, ObservableObject {
     public let state: LiveState
     private let router: FrameRouter
     private var collector: Collector?
+    private var whoopStore: WhoopStore?
 
     // MARK: Upload
     private var uploader: Uploader?
@@ -152,6 +153,7 @@ public final class BLEManager: NSObject, ObservableObject {
         guard collector == nil else { return }
         guard let path = try? StorePaths.defaultDatabasePath() else { return }
         guard let store = try? await WhoopStore(path: path) else { return }
+        whoopStore = store
         try? await store.upsertDevice(id: deviceId, mac: nil, name: "WHOOP 4.0")
         // Research toggle — OFF by default. When disabled the app is decoded-only and never
         // persists raw frames. Flip "enableRawCapture" in UserDefaults to capture raw again.
@@ -170,6 +172,20 @@ public final class BLEManager: NSObject, ObservableObject {
         if let ref = clockRef {
             collector?.clockRef = ref
             backfiller?.clockRef = ref
+        }
+        await recoverStrandedUploadsIfNeeded()
+    }
+
+    /// Rows can be marked synced locally even though the server never received them (timeouts /
+    /// all-skipped batches on older builds). Reset and re-drain when local HR is large, nothing
+    /// pending, and the server has had no HR recently.
+    private func recoverStrandedUploadsIfNeeded() async {
+        guard let store = whoopStore, let cfg = AppConfig.uploaderConfig() else { return }
+        let recovered = await StrandedUploadRecovery.recoverIfNeeded(
+            store: store, config: cfg, deviceId: deviceId)
+        if recovered {
+            log("Upload recovery: reset stranded biometric rows — starting drain")
+            uploadOpportunistically()
         }
     }
 
@@ -219,9 +235,11 @@ public final class BLEManager: NSObject, ObservableObject {
         Task { @MainActor in await collector?.prune() }
     }
 
-    /// Light storage summary for the UI (decoded rows, raw batches, raw bytes). nil without a store.
-    public func storageStats() async -> (decodedRows: Int, rawBatches: Int, rawBytes: Int)? {
-        await collector?.storageStats()
+    /// Light storage summary for the UI (decoded rows, raw batches, raw bytes, pending HR). nil without a store.
+    public func storageStats() async -> (decodedRows: Int, rawBatches: Int, rawBytes: Int, pendingHR: Int)? {
+        guard let base = await collector?.storageStats() else { return nil }
+        let pending = (try? await whoopStore?.hrUploadStats(deviceId: deviceId).pending) ?? 0
+        return (base.decodedRows, base.rawBatches, base.rawBytes, pending)
     }
 
     /// Capture raw accelerometer (type-43 IMU) frames on demand for a bounded window, then stop.
@@ -946,6 +964,7 @@ extension BLEManager: CBPeripheralDelegate {
         // SEND_HISTORICAL runs on a settled link, like the paced Mac prototype. beginBackfill is itself
         // gated on connectHandshakeDone so a racing foreground/restore trigger can't fire it early.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
+        Task { await self.recoverStrandedUploadsIfNeeded() }
         uploadOpportunistically()
         // NOTE: the server pull + cloud-restore are deliberately NOT kicked here. They share the
         // WhoopStore actor with the historical offload, and a large first-run pull would starve the

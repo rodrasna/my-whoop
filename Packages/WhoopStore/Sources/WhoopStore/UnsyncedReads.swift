@@ -207,4 +207,36 @@ extension WhoopStore {
                 arguments: [deviceId]) ?? 0
         }
     }
+
+    /// Local HR row counts for upload-health diagnostics.
+    public func hrUploadStats(deviceId: String) async throws -> (total: Int, pending: Int) {
+        try syncRead { db in
+            let total = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM hrSample WHERE deviceId = ?",
+                arguments: [deviceId]) ?? 0
+            let pending = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM hrSample WHERE deviceId = ? AND synced = 0",
+                arguments: [deviceId]) ?? 0
+            return (total, pending)
+        }
+    }
+
+    /// Mark biometric streams pending upload again. Used when rows were falsely marked synced
+    /// (e.g. server rejected them but the client treated the POST as success).
+    @discardableResult
+    public func resetBiometricStreamSyncFlags(deviceId: String) async throws -> Int {
+        let tables = [
+            "hrSample", "rrInterval", "spo2Sample", "skinTempSample", "respSample", "gravitySample",
+        ]
+        return try syncWrite { db in
+            var n = 0
+            for table in tables {
+                try db.execute(
+                    sql: "UPDATE \(table) SET synced = 0 WHERE deviceId = ? AND synced = 1",
+                    arguments: [deviceId])
+                n += db.changesCount
+            }
+            return n
+        }
+    }
 }
