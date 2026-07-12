@@ -131,7 +131,10 @@ final class Backfiller {
             let ref = clockRef ?? { let now = Int(Date().timeIntervalSince1970); return ClockRef(device: now, wall: now) }()
             let parsed = frames.map { parseFrame($0) }
             let decoded = extract(parsed, ref.device, ref.wall)
-            do { try await store.insert(decoded, deviceId: deviceId) } catch { return }
+            do { try await store.insert(decoded, deviceId: deviceId) } catch {
+                print("Backfiller: insert failed — hr=\(decoded.hr.count) events=\(decoded.events.count): \(error)")
+                return
+            }
 
             // RAW: only persisted when the research toggle is ON. Default OFF → decoded-only; the
             // chunk is still durably committed (decoded) so the trim is safe to advance + ack.

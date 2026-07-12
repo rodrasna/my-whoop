@@ -167,6 +167,10 @@ public final class BLEManager: NSObject, ObservableObject {
             uploader = Uploader(config: cfg, store: store, deviceId: deviceId)
             serverSync = ServerSync(config: cfg, store: store, deviceId: deviceId)
         }
+        if let ref = clockRef {
+            collector?.clockRef = ref
+            backfiller?.clockRef = ref
+        }
     }
 
     /// Designated initializer for testing and preview use: accepts a pre-built Collector.
@@ -784,6 +788,9 @@ extension BLEManager: CBCentralManagerDelegate {
         state.connected = false
         didBond = false
         clockRequested = false
+        clockRef = nil
+        collector?.clockRef = nil
+        backfiller?.clockRef = nil
         connectHandshakeDone = false
         // Reset backfill state so the next connect starts a fresh offload.
         backfillStarted = false
@@ -932,6 +939,7 @@ extension BLEManager: CBPeripheralDelegate {
                                            // identity clockRef — but a real correlation helps realtime decode.)
         }
         send(.sendR10R11Realtime, payload: [0x00])   // stop the type-43 realtime flood (BLE airtime/battery)
+        send(.toggleRealtimeHR, payload: [0x01])     // keep type-40 HR flowing while connected (not only on Device tab)
         send(.getDataRange)                          // refresh the strap's stored range for the watchdog
         // Plain offload (no high-freq-sync), rate-limited (first connect always runs; reconnect-flaps are
         // throttled by BackfillPolicy). Deferred ~1.5s so SET_CLOCK/GET_DATA_RANGE round-trip first and

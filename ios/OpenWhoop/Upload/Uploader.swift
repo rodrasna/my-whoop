@@ -13,8 +13,15 @@ import WhoopStore
 /// synced on 2xx. This correctly uploads backfilled (older-ts) rows the historical offload inserts
 /// after a recent live row already advanced past them — the old highwater stranded those forever.
 final class Uploader {
-    /// Page size for a decoded-stream drain. HR is 1 Hz and dominant, so pages are generous.
+    /// Page size for most decoded streams.
     private static let pageLimit = 5000
+    /// Smaller HR pages — large HR POSTs were timing out while events/battery still uploaded.
+    private static let hrPageLimit = 1200
+
+    private struct IngestResult {
+        let ok: Bool
+        let skippedForKey: Int
+    }
 
     private let config: UploaderConfig
     private let store: WhoopStore
@@ -66,25 +73,34 @@ final class Uploader {
     /// `bodyKey` + `encode` build the JSON body for that stream. `mark` flips the page synced.
     private func drainStream<Row>(
         read: (_ limit: Int) async throws -> [Row],
+        pageLimit: Int = pageLimit,
         bodyKey: String,
         encode: (Row) -> [String: Any],
         mark: ([Row]) async throws -> Void
     ) async {
         while true {
-            guard let rows = try? await read(Self.pageLimit), !rows.isEmpty else { return }
+            guard let rows = try? await read(pageLimit), !rows.isEmpty else { return }
             let streamsBody: [String: Any] = [bodyKey: rows.map(encode)]
-            if await postDecoded(streams: streamsBody) {
-                try? await mark(rows)
+            let result = await postDecoded(streams: streamsBody, streamKey: bodyKey)
+            if result.ok {
+                if result.skippedForKey < rows.count {
+                    try? await mark(rows)
+                } else {
+                    print("Uploader: server skipped all \(rows.count) \(bodyKey) rows — leaving synced=0 for retry")
+                    return
+                }
             } else {
-                return   // server/network failure → stop; rows stay synced=0, retry next connect
+                print("Uploader: POST /v1/ingest-decoded failed for \(bodyKey) (\(rows.count) rows)")
+                return
             }
-            if rows.count < Self.pageLimit { return }   // last page
+            if rows.count < pageLimit { return }
         }
     }
 
     private func drainHR() async {
         await drainStream(
             read: { try await self.store.unsyncedHR(deviceId: self.deviceId, limit: $0) },
+            pageLimit: Self.hrPageLimit,
             bodyKey: "hr",
             encode: { ["ts": $0.ts, "bpm": $0.bpm] },
             mark: { try await self.store.markHRSynced(deviceId: self.deviceId, rows: $0) })
@@ -159,14 +175,45 @@ final class Uploader {
             mark: { try await self.store.markGravitySynced(deviceId: self.deviceId, rows: $0) })
     }
 
-    /// POST to /v1/ingest-decoded. Returns true on 2xx.
-    @discardableResult
-    private func postDecoded(streams: [String: Any]) async -> Bool {
+    /// POST to /v1/ingest-decoded.
+    private func postDecoded(streams: [String: Any], streamKey: String) async -> IngestResult {
         let body: [String: Any] = [
             "device": ["id": deviceId],
             "streams": streams
         ]
-        return await post(path: "/v1/ingest-decoded", body: body)
+        return await postIngestDecoded(body: body, streamKey: streamKey)
+    }
+
+    private func postIngestDecoded(body: [String: Any], streamKey: String) async -> IngestResult {
+        guard let url = URL(string: "/v1/ingest-decoded", relativeTo: config.baseURL)
+                     ?? URL(string: config.baseURL.absoluteString + "/v1/ingest-decoded") else {
+            return IngestResult(ok: false, skippedForKey: 0)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+            return IngestResult(ok: false, skippedForKey: 0)
+        }
+        request.httpBody = data
+        do {
+            let (respData, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return IngestResult(ok: false, skippedForKey: 0)
+            }
+            let skipped = Self.skippedCount(in: respData, streamKey: streamKey)
+            return IngestResult(ok: true, skippedForKey: skipped)
+        } catch {
+            return IngestResult(ok: false, skippedForKey: 0)
+        }
+    }
+
+    private static func skippedCount(in data: Data, streamKey: String) -> Int {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let skipped = obj["skipped"] as? [String: Any] else { return 0 }
+        return (skipped[streamKey] as? NSNumber)?.intValue ?? 0
     }
 
     // MARK: - Raw drain (explicit research export only)

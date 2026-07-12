@@ -16,9 +16,6 @@ public struct LiveView: View {
             .onAppear {
                 if model.state.connected { model.startRealtimeHR() }
             }
-            .onDisappear {
-                model.stopRealtimeHR()
-            }
             // Hide the system nav bar on the root; the custom ScreenHeader is inside the ScrollView.
             .toolbar(.hidden, for: .navigationBar)
             // scenePhase is still observed here: the Device tab hosts the scenePhase

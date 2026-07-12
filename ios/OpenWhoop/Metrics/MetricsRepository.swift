@@ -477,21 +477,35 @@ final class MetricsRepository: ObservableObject {
     func loadPRVNProgramFromServerIfNeeded() async {
         await ensureOpen()
         guard let serverSync else { return }
-        let todayMondayKey = PRVNProgramStore.dayKey(
-            for: PRVNProgramStore.monday(containing: Date())
-        )
+        let monday = PRVNProgramStore.monday(containing: Date())
+        let todayMondayKey = PRVNProgramStore.dayKey(for: monday)
         let needsLoad = PRVNProgramStore.shared.week == nil
             || PRVNProgramStore.shared.week?.weekStart != todayMondayKey
         guard needsLoad else { return }
-        guard let payload = await serverSync.fetchPRVNProgram() else { return }
-        PRVNProgramStore.shared.importFromServer(pasteText: payload.pasteText, weekStartISO: payload.weekStart)
+        if let payload = await serverSync.fetchPRVNProgram(), payload.weekStart >= todayMondayKey {
+            PRVNProgramStore.shared.importFromServer(pasteText: payload.pasteText, weekStartISO: payload.weekStart)
+            return
+        }
+        _ = await syncPRVNProgram(weekStart: monday)
     }
 
     private func maybeAutoSyncPRVNProgram() async {
-        guard isServerConfigured, PRVNAutoSync.shouldRunAutoSync() else { return }
+        guard isServerConfigured else { return }
         let monday = PRVNAutoSync.weekMondayToSync()
+        let currentKey = PRVNProgramStore.dayKey(for: monday)
+        let sundayAuto = PRVNAutoSync.shouldRunAutoSync()
+        let localStale = PRVNProgramStore.shared.week?.weekStart != currentKey
+        let serverStale = await isPRVNWeekStaleOnServer(currentMondayKey: currentKey)
+        guard sundayAuto || localStale || serverStale else { return }
         guard await syncPRVNProgram(weekStart: monday) else { return }
         PRVNAutoSync.markSynced(weekMonday: monday)
+    }
+
+    /// True when the server cache is missing or older than the current calendar week.
+    private func isPRVNWeekStaleOnServer(currentMondayKey: String) async -> Bool {
+        guard let serverSync else { return true }
+        guard let payload = await serverSync.fetchPRVNProgram() else { return true }
+        return payload.weekStart < currentMondayKey
     }
 
     // MARK: - Sleep tab reads (M2)
