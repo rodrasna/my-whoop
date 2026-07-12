@@ -283,7 +283,11 @@ final class Uploader {
 /// Detects HR rows marked uploaded locally but missing on the server, and resets them.
 enum StrandedUploadRecovery {
     private static let minLocalHR = 5_000
-    private static let lookbackSeconds: TimeInterval = 72 * 3600
+    /// Only check the recent window — older server HR (e.g. Jul 9) must not block recovery
+    /// when Jul 10+ never uploaded.
+    private static let gapLookbackSeconds: TimeInterval = 36 * 3600
+    /// Stranded when local store is large but the server received almost nothing recently.
+    private static let maxRecentServerHR = 500
 
     static func recoverIfNeeded(store: WhoopStore,
                                 config: UploaderConfig,
@@ -291,17 +295,21 @@ enum StrandedUploadRecovery {
         guard let stats = try? await store.hrUploadStats(deviceId: deviceId) else { return false }
         guard stats.total >= minLocalHR, stats.pending == 0 else { return false }
 
-        let serverHR = await recentServerHRCount(config: config, deviceId: deviceId)
-        guard serverHR == 0 else { return false }
+        let recentServerHR = await serverHRCount(config: config,
+                                               deviceId: deviceId,
+                                               lookbackSeconds: gapLookbackSeconds)
+        guard recentServerHR >= 0, recentServerHR < maxRecentServerHR else { return false }
 
         let reset = (try? await store.resetBiometricStreamSyncFlags(deviceId: deviceId)) ?? 0
         if reset > 0 {
-            print("StrandedUploadRecovery: reset \(reset) biometric rows for re-upload")
+            print("StrandedUploadRecovery: reset \(reset) biometric rows (server HR last 36h=\(recentServerHR))")
         }
         return reset > 0
     }
 
-    private static func recentServerHRCount(config: UploaderConfig, deviceId: String) async -> Int {
+    private static func serverHRCount(config: UploaderConfig,
+                                      deviceId: String,
+                                      lookbackSeconds: TimeInterval) async -> Int {
         let now = Int(Date().timeIntervalSince1970)
         let from = now - Int(lookbackSeconds)
         guard let url = URL(string: "/v1/summary?device=\(deviceId)&from=\(from)&to=\(now)",
