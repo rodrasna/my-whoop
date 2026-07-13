@@ -64,6 +64,7 @@ re/command_probe.jsonl
 
 # Xcode device-build derived data (CLI builds)
 ios/build/
+ios/build-device/
 
 # Mac-side device-soak captures (gitignored; not the committed hist_biometric.bin fixture)
 fixtures/soak_*.bin
