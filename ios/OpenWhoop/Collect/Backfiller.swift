@@ -131,9 +131,28 @@ final class Backfiller {
             let ref = clockRef ?? { let now = Int(Date().timeIntervalSince1970); return ClockRef(device: now, wall: now) }()
             let parsed = frames.map { parseFrame($0) }
             let decoded = extract(parsed, ref.device, ref.wall)
+            let decodedRows = decoded.hr.count + decoded.rr.count + decoded.spo2.count
+                + decoded.skinTemp.count + decoded.resp.count + decoded.gravity.count
+                + decoded.events.count + decoded.battery.count
+            if decodedRows == 0 {
+                // Non-empty chunk that decoded to NOTHING. We still ack (a chunk can legitimately
+                // carry only frame types we don't persist, and skipping the ack wedges the whole
+                // offload), but this is the one path where an ack can trim strap data we never
+                // stored — so it must never be silent.
+                print("Backfiller: WARNING — \(frames.count) frames decoded to 0 rows, acking anyway (trim=\(trim))")
+            }
             do { try await store.insert(decoded, deviceId: deviceId) } catch {
                 print("Backfiller: insert failed — hr=\(decoded.hr.count) events=\(decoded.events.count): \(error)")
                 return
+            }
+
+            // Advance the HISTORICAL HR frontier (what the strap-liveness watchdog compares
+            // against GET_DATA_RANGE). Forward-only: a replayed/old chunk never regresses it.
+            if let newestHr = decoded.hr.map(\.ts).max() {
+                let current = (try? await store.cursor("hist_hr_frontier")) ?? nil
+                if newestHr > (current ?? 0) {
+                    try? await store.setCursor("hist_hr_frontier", newestHr)
+                }
             }
 
             // RAW: only persisted when the research toggle is ON. Default OFF → decoded-only; the

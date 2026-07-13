@@ -36,6 +36,7 @@ private struct MainAppShell: View {
     @ObservedObject private var dayPlanStore = WorkoutDayPlanStore.shared
 
     init() {
+        setvbuf(stdout, nil, _IOLBF, 0)   // line-buffer stdout so `devicectl --console` streams prints live
         let settings = ServerConnectionSettings.shared
         let deviceId = settings.effectiveDeviceId.isEmpty ? "my-whoop" : settings.effectiveDeviceId
         _metrics = StateObject(wrappedValue: MetricsRepository(settings: settings))

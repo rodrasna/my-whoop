@@ -448,8 +448,17 @@ public final class BLEManager: NSObject, ObservableObject {
     private func checkStrapLiveness() {
         let strapNewest = strapNewestTs
         Task { @MainActor in
-            let frontier = await collector?.latestHRSampleTs()
-            let front: Int? = frontier ?? nil
+            // Frontier = newest HR ts persisted by the HISTORICAL offload (cursor advanced per
+            // chunk by the Backfiller), NOT the store-wide max HR ts: live realtime samples
+            // advance the store-wide max continuously while connected, which kept the detector
+            // reading "progressing" through a 3-day-dead offload. Seeded once from the store-wide
+            // max so there's a baseline before the first post-fix chunk lands; after that only
+            // real historical chunks move it.
+            var front = (try? await whoopStore?.cursor("hist_hr_frontier")) ?? nil
+            if front == nil, let seed = await collector?.latestHRSampleTs() {
+                try? await whoopStore?.setCursor("hist_hr_frontier", seed)
+                front = seed
+            }
             let now = Date().timeIntervalSince1970
             let stuck = stuckDetector.observe(strapNewestTs: strapNewest,
                                               ourFrontierTs: front,
@@ -555,7 +564,31 @@ public final class BLEManager: NSObject, ObservableObject {
     }()
 
     private func log(_ s: String) {
-        state.append(log: "[\(timestamp())] \(s)")
+        let line = "[\(timestamp())] \(s)"
+        state.append(log: line)
+        print("BLE: \(s)")
+        // Mirror to Documents/ble-console.log so the log survives the 30-line UI buffer and can be
+        // pulled from the Mac (`devicectl device copy files --domain-type appDataContainer`).
+        BLEManager.appendToLogFile(line)
+    }
+
+    private static let logFileURL = FileManager.default
+        .urls(for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("ble-console.log")
+
+    private static func appendToLogFile(_ line: String) {
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        if let size = (try? FileManager.default.attributesOfItem(atPath: logFileURL.path)[.size]) as? Int,
+           size > 2_000_000 {
+            try? FileManager.default.removeItem(at: logFileURL)   // crude 2 MB cap: start over
+        }
+        if let h = try? FileHandle(forWritingTo: logFileURL) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: data)
+        } else {
+            try? data.write(to: logFileURL)
+        }
     }
     private func timestamp() -> String {
         BLEManager.logTimeFormatter.string(from: Date())
