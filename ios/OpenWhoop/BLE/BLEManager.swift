@@ -181,6 +181,12 @@ public final class BLEManager: NSObject, ObservableObject {
     /// pending, and the server has had no HR recently.
     private func recoverStrandedUploadsIfNeeded() async {
         guard let store = whoopStore, let cfg = AppConfig.uploaderConfig() else { return }
+        // Inverse pass first: a backlog the server already has is marked synced, not re-sent.
+        let reconciled = await StrandedUploadRecovery.reconcileIfAlreadyUploaded(
+            store: store, config: cfg, deviceId: deviceId)
+        if reconciled {
+            log("Upload recovery: pending backlog already on server — marked synced")
+        }
         let recovered = await StrandedUploadRecovery.recoverIfNeeded(
             store: store, config: cfg, deviceId: deviceId)
         if recovered {
@@ -257,7 +263,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Light storage summary for the UI (decoded rows, raw batches, raw bytes, HR pending). nil without a store.
     public func storageStats() async -> (decodedRows: Int, rawBatches: Int, rawBytes: Int, hrTotal: Int, pendingHR: Int)? {
         guard let base = await collector?.storageStats() else { return nil }
-        let hr = (try? await whoopStore?.hrUploadStats(deviceId: deviceId)) ?? (0, 0)
+        let hr = (try? await whoopStore?.hrUploadStats(deviceId: deviceId)) ?? (total: 0, pending: 0)
         return (base.decodedRows, base.rawBatches, base.rawBytes, hr.total, hr.pending)
     }
 

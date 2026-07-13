@@ -221,6 +221,36 @@ extension WhoopStore {
         }
     }
 
+    /// Local HR rows with ts >= `from` (unix seconds). Windowed counterpart of `hrUploadStats`
+    /// for comparing phone vs server fill over the same period.
+    public func hrCount(deviceId: String, from: Int) async throws -> Int {
+        try syncRead { db in
+            try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM hrSample WHERE deviceId = ? AND ts >= ?",
+                arguments: [deviceId, from]) ?? 0
+        }
+    }
+
+    /// Mark every biometric row as uploaded. Inverse of `resetBiometricStreamSyncFlags`, for
+    /// when a comparison against the server shows the pending backlog is already there
+    /// (e.g. rows restored from the server that a recovery pass wrongly re-flagged).
+    @discardableResult
+    public func markAllBiometricStreamSyncFlags(deviceId: String) async throws -> Int {
+        let tables = [
+            "hrSample", "rrInterval", "spo2Sample", "skinTempSample", "respSample", "gravitySample",
+        ]
+        return try syncWrite { db in
+            var n = 0
+            for table in tables {
+                try db.execute(
+                    sql: "UPDATE \(table) SET synced = 1 WHERE deviceId = ? AND synced = 0",
+                    arguments: [deviceId])
+                n += db.changesCount
+            }
+            return n
+        }
+    }
+
     /// Mark biometric streams pending upload again. Used when rows were falsely marked synced
     /// (e.g. server rejected them but the client treated the POST as success).
     @discardableResult

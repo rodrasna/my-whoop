@@ -292,17 +292,50 @@ enum StrandedUploadRecovery {
         guard let stats = try? await store.hrUploadStats(deviceId: deviceId) else { return false }
         guard stats.total >= minLocalHR, stats.pending == 0 else { return false }
 
+        // Stranded means "the PHONE has rows in the window the server is missing" — so the
+        // comparison must be windowed on BOTH sides. Comparing server-in-window against the
+        // TOTAL store size false-positives whenever the phone itself has nothing in the window
+        // (e.g. the store was just restored FROM the server), and the reset then re-flags the
+        // entire restored store for a no-op re-upload, forever, on every connect.
+        let localSinceGap = (try? await store.hrCount(deviceId: deviceId, from: gapEpochStart)) ?? 0
+        guard localSinceGap >= 10_000 else { return false }
+
         let now = Int(Date().timeIntervalSince1970)
         let serverSinceGap = await serverHRCount(config: config,
                                                deviceId: deviceId,
                                                from: gapEpochStart,
                                                to: now)
         guard serverSinceGap >= 0 else { return false }
-        let threshold = max(10_000, stats.total / 20)
+        let threshold = max(10_000, localSinceGap / 20)
         guard serverSinceGap < threshold else { return false }
 
         return await resetAndLog(store: store, deviceId: deviceId,
-                                 reason: "server since gap=\(serverSinceGap) local=\(stats.total)")
+                                 reason: "server since gap=\(serverSinceGap) local since gap=\(localSinceGap)")
+    }
+
+    /// Inverse pass: a huge pending backlog whose rows the server already has (store restored
+    /// from the server, then wrongly re-flagged by an earlier recovery build) is marked back to
+    /// synced instead of re-uploaded row by row. Gated on the server holding statistically the
+    /// same HR store (count within ±1%) so it can never swallow genuinely unsent rows: any real
+    /// local-only backlog makes the phone count exceed the server's and the gate fails.
+    static func reconcileIfAlreadyUploaded(store: WhoopStore,
+                                           config: UploaderConfig,
+                                           deviceId: String) async -> Bool {
+        guard let stats = try? await store.hrUploadStats(deviceId: deviceId) else { return false }
+        guard stats.pending >= 500_000 else { return false }
+
+        let now = Int(Date().timeIntervalSince1970)
+        let serverTotal = await serverHRCount(config: config, deviceId: deviceId, from: 0, to: now)
+        guard serverTotal >= 0 else { return false }
+        let tolerance = max(1_000, stats.total / 100)
+        guard abs(serverTotal - stats.total) <= tolerance else { return false }
+
+        let marked = (try? await store.markAllBiometricStreamSyncFlags(deviceId: deviceId)) ?? 0
+        if marked > 0 {
+            print("StrandedUploadRecovery: reconciled \(marked) rows already on server "
+                  + "(server=\(serverTotal) local=\(stats.total))")
+        }
+        return marked > 0
     }
 
     static func forceReset(store: WhoopStore, deviceId: String) async -> Bool {
