@@ -45,6 +45,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Safety-net detector: strap reports newer data than us AND our frontier frozen 10 min ⇒ flag for
     /// reboot. behindGapSeconds avoids false positives when off-wrist / caught up. Insurance only.
     private var stuckDetector = StuckStrapDetector(stuckAfterSeconds: 600, behindGapSeconds: 300)
+    /// One-shot guard for the `-repairStrap` launch arg (a reboot drops the link and reconnects
+    /// within the same process — without this the arg would reboot in a loop).
+    private var didSendRepairReboot = false
+    /// `-bleDebug` launch arg: dump raw COMMAND_RESPONSE frames to the log.
+    private lazy var bleDebug = ProcessInfo.processInfo.arguments.contains("-bleDebug")
     /// Newest record unix the strap reports having (from the GET_DATA_RANGE response); refreshed each
     /// offload. Compared against our frontier to tell "stuck" from "off-wrist/caught-up".
     private var strapNewestTs: Int?
@@ -997,15 +1002,46 @@ extension BLEManager: CBPeripheralDelegate {
         startUploadTimer()     // keep the server current during the live session
         startBackfillTimer()   // re-offload the type-47 store every backfillIntervalSeconds
         onStrapReady?()
+        // CLOCK-LOST recovery on demand (`-repairStrap` launch arg): once per process launch,
+        // 2s after the handshake's SET_CLOCK, reboot the strap so the clock latches and biometric
+        // logging resumes (see WhoopCommand.rebootStrap). The post-reboot reconnect runs a fresh
+        // handshake (SET_CLOCK + GET_DATA_RANGE); a DATA_RANGE response appearing again is the
+        // success signal.
+        if ProcessInfo.processInfo.arguments.contains("-repairStrap"), !didSendRepairReboot {
+            didSendRepairReboot = true
+            log("Repair: CLOCK-LOST recovery — SET_CLOCK + reboot in 2s to latch")
+            send(.setClock, payload: BLEManager.setClockPayload())
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.send(.rebootStrap, payload: [0x00])
+            }
+        }
     }
 
-    /// SET_CLOCK(10) payload = the strap's 8-byte form: [seconds u32 LE][subseconds
-    /// u32 LE], subseconds in 1/32768 s (0 is fine). NOT the old 9-byte [u32 + 5 pad] — a wrong-length
-    /// SET_CLOCK is ack-received but NOT latched, leaving the RTC lost so the strap won't serve type-47.
+    /// Manual CLOCK-LOST recovery (Device tab): SET_CLOCK, then reboot the strap 2s later to
+    /// latch it. Non-destructive — the strap's data store survives a reboot; the link drops and
+    /// re-establishes in seconds.
+    ///
+    /// Sends BOTH observed SET_CLOCK payload forms. The 2026-05-24 recovery that revived this
+    /// strap's dead RTC (spec §0-bis) used the 9-byte `[unix u32 LE][5 pad]` form and the strap
+    /// acked it; the current 8-byte `[seconds][subseconds]` form gets NO response from a
+    /// clock-lost strap (seen live 2026-07-13). Whichever form this firmware accepts, latches.
+    public func repairStrapClock() {
+        log("Repair: manual CLOCK-LOST recovery — SET_CLOCK + reboot")
+        send(.setClock, payload: BLEManager.setClockPayload())
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.send(.rebootStrap, payload: [0x00])
+        }
+    }
+
+    /// SET_CLOCK(10) payload = `[unix u32 LE][5 zero pad]` (9 bytes).
+    /// VERIFIED LIVE on this strap (2026-07-13, `-bleDebug` capture): the 9-byte form gets a
+    /// cmd=10 ACK and latches (with a reboot) a lost RTC; the 8-byte `[seconds][subseconds]`
+    /// form is silently ignored — no ack, healthy or wedged. (An older comment here claimed the
+    /// reverse; it did not survive contact with the hardware.)
     static func setClockPayload(now: UInt32 = UInt32(Date().timeIntervalSince1970)) -> [UInt8] {
         [UInt8(now & 0xFF), UInt8((now >> 8) & 0xFF),
          UInt8((now >> 16) & 0xFF), UInt8((now >> 24) & 0xFF),
-         0, 0, 0, 0]
+         0, 0, 0, 0, 0]
     }
 
     /// Newest plausible-unix marker in a GET_DATA_RANGE COMMAND_RESPONSE = the strap's newest stored
@@ -1052,6 +1088,12 @@ extension BLEManager: CBPeripheralDelegate {
              BLEManager.eventNotifyChar:
             // Reassemble (no-op for already-complete frames) then route each complete frame.
             for frame in reassembler.feed(bytes) {
+                // `-bleDebug`: dump every COMMAND_RESPONSE frame raw. The parsed paths only log
+                // when values look plausible (e.g. DATA_RANGE with a sane unix), so a strap
+                // answering with a lost/garbage RTC is indistinguishable from silence without this.
+                if bleDebug, frame.count > 6, frame[4] == 36 {
+                    log("RX cmd-resp cmd=\(frame[6]) len=\(frame.count) \(hex(Array(frame.prefix(40))))")
+                }
                 if frame.count > 4, frame[4] == 36 { handleAlarmCommandResponse(frame) }
                 router.handle(frame: frame)                       // UI (always)
                 if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,

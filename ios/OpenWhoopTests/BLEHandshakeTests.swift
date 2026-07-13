@@ -11,20 +11,20 @@ import WhoopProtocol
 @MainActor
 final class BLEHandshakeTests: XCTestCase {
 
-    // SET_CLOCK payload = <unix u32 LE> + <u32 zero> = 8 bytes, mirroring the current RE refs
-    // (re/fix_raw_flood.py, re/enable_dataproducts.py: struct.pack("<II", now, 0)). The strap reads
-    // the leading u32 unix timestamp; the trailing word is zero pad. (Older diag scripts sent a
-    // 9-byte `<I` + 5-zero variant — same leading timestamp; the shipping builder standardizes on <II.)
-    func testSetClockPayloadIsUnixLE32PlusU32Zero() {
+    // SET_CLOCK payload = <unix u32 LE> + <5 zero pad> = 9 bytes. Verified live 2026-07-13
+    // (`-bleDebug` RX capture): this form gets a cmd=10 ACK from the strap and latches a lost RTC
+    // (with a reboot); the 8-byte `<II` form the shipping builder previously used is silently
+    // ignored — no ack — matching the 2026-05-24 recovery that also used the 9-byte form.
+    func testSetClockPayloadIsUnixLE32Plus5ZeroPad() {
         let now: UInt32 = 0x6650_1234   // arbitrary fixed epoch
         let payload = BLEManager.setClockPayload(now: now)
-        XCTAssertEqual(payload, [0x34, 0x12, 0x50, 0x66, 0, 0, 0, 0])
-        XCTAssertEqual(payload.count, 8)
+        XCTAssertEqual(payload, [0x34, 0x12, 0x50, 0x66, 0, 0, 0, 0, 0])
+        XCTAssertEqual(payload.count, 9)
     }
 
     func testSetClockPayloadUsesLittleEndianByteOrder() {
         let payload = BLEManager.setClockPayload(now: 1)
-        XCTAssertEqual(payload, [0x01, 0x00, 0x00, 0x00, 0, 0, 0, 0])
+        XCTAssertEqual(payload, [0x01, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0])
     }
 
     // The SET_CLOCK frame the handshake writes must pass crc8 + crc32 verification.

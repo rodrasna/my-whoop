@@ -173,6 +173,9 @@ public final class LiveViewModel: ObservableObject {
         Task { await ble.forceReuploadBiometrics() }
     }
 
+    /// CLOCK-LOST recovery: SET_CLOCK + strap reboot (see BLEManager.repairStrapClock).
+    public func repairStrap() { ble.repairStrapClock() }
+
     /// Refresh the storage summary line from the store (polled every few seconds by LiveView).
     public func refreshStorage() {
         Task { @MainActor in

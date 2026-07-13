@@ -213,6 +213,11 @@ final class AlarmCommandsTests: XCTestCase {
     func testAlarmResponseParserOkStatus() {
         XCTAssertTrue(AlarmResponseParser.isOk([0x0a, 0x01]))
         XCTAssertFalse(AlarmResponseParser.isOk([0x0a, 0x03]))
+        // Real frames captured live 2026-07-13 (payload = [rolling counter][status][...]):
+        XCTAssertTrue(AlarmResponseParser.isOk([0x04, 0x01, 0x00, 0x00, 0x00]))   // SET_CLOCK ack
+        XCTAssertTrue(AlarmResponseParser.isOk([0x1e, 0x01, 0x01, 0x00, 0x00]))   // DISABLE_ALARM ack
+        XCTAssertFalse(AlarmResponseParser.isOk([0x04, 0x00, 0x00]))              // non-OK status
+        XCTAssertFalse(AlarmResponseParser.isOk([0x04]))                          // too short
     }
 
     func testAlarmResponseParserEpochFormPrefixed() {

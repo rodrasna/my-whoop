@@ -57,6 +57,14 @@ public enum WhoopCommand: UInt8, CaseIterable {
     /// Cancel / disarm the currently-armed firmware alarm. Payload [0x01].
     case disableAlarm          = 69
 
+    /// Reboot the strap. Payload [0x00]; the link drops and the strap re-advertises in seconds.
+    /// NOT exposed in the free-form command sender — reserved for the CLOCK-LOST recovery sequence
+    /// (SET_CLOCK → REBOOT_STRAP to latch; see docs/specs/2026-05-24-whoop-protocol-complete.md §0-bis):
+    /// a strap that loses its RTC (deep battery death) stops logging biometrics AND stops acking
+    /// SET_CLOCK/GET_DATA_RANGE; only a reboot after SET_CLOCK restores historical logging.
+    /// Verified on this strap 2026-05-24. Does not clear the data store.
+    case rebootStrap           = 29
+
     /// Human-readable label for the command sender UI.
     public var label: String {
         switch self {
@@ -84,6 +92,7 @@ public enum WhoopCommand: UInt8, CaseIterable {
         case .getAlarmTime:          return "Get Alarm Time"
         case .runAlarm:              return "Run Alarm"
         case .disableAlarm:          return "Disable Alarm"
+        case .rebootStrap:           return "Reboot Strap"
         }
     }
 
@@ -107,8 +116,14 @@ public enum WhoopCommand: UInt8, CaseIterable {
 // MARK: - Alarm response parsing
 
 enum AlarmResponseParser {
+    /// Command-response payload as sliced by BLEManager (`frame[7..<len-4]`, i.e. AFTER the echoed
+    /// cmd byte at frame[6]): `[rolling counter][status][...]`. Verified live 2026-07-13 via
+    /// `-bleDebug` RX capture — SET_CLOCK ack `04 01 00 00 00`, DISABLE_ALARM ack `1e 01 01 …`.
+    /// status 0x01 = OK. (The old check `payload[0] == 0x0a` assumed the payload began with the
+    /// echoed cmd; it never matched a real frame — no ack was ever received until the 9-byte
+    /// SET_CLOCK form landed, so it went unnoticed.)
     static func isOk(_ payload: [UInt8]) -> Bool {
-        payload.count >= 2 && payload[0] == 0x0a && payload[1] == 0x01
+        payload.count >= 2 && payload[1] == 0x01
     }
 
     static func epoch(from payload: [UInt8]) -> UInt32? {

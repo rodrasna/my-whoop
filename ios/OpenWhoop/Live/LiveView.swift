@@ -343,6 +343,15 @@ private struct LiveContentView: View {
                         model.forceReupload()
                     }
                 }
+
+                // Recuperación de reloj perdido: la pulsera deja de grabar histórico tras una
+                // muerte profunda de batería (SET_CLOCK sin ack, GET_DATA_RANGE mudo). El reboot
+                // tras SET_CLOCK latchea el reloj y reanuda la grabación. No borra datos.
+                consoleButton("Reparar pulsera (reloj perdido · reinicia la pulsera)",
+                              icon: "clock.arrow.circlepath",
+                              accent: WH.Color.recoveryRed, prominent: false) {
+                    model.repairStrap()
+                }
             }
         }
     }
