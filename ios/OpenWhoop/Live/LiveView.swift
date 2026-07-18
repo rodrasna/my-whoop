@@ -209,6 +209,7 @@ private struct LiveContentView: View {
                 if state.offloadStalled {
                     StallRecoveryBanner(
                         timeoutCount: state.consecutiveOffloadTimeouts,
+                        isClockLoss: state.clockLossStatus != nil,
                         onRepair: { model.repairStrap() },
                         onRetrySync: { model.syncNow() }
                     )
@@ -242,7 +243,9 @@ private struct LiveContentView: View {
         }
         if state.offloadStalled {
             return syncStatusLine(
-                "Descarga atascada — reparando reloj o pon la pulsera al cargador",
+                state.clockLossStatus != nil
+                ? OffloadStallPolicy.clockHoldStatus
+                : "Descarga atascada — repara el reloj o pon la pulsera al cargador",
                 WH.Color.recoveryRed
             )
         }
