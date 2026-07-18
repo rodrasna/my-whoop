@@ -49,6 +49,13 @@ final class Backfiller {
     /// The clock reference set by BLEManager when GET_CLOCK confirms (required for decoding).
     var clockRef: ClockRef?
 
+    /// When set, corrupt absolute RTC timestamps in type-47 chunks are remapped before insert.
+    var clockLossAnchor: ClockLossAnchor?
+
+    /// Cumulative salvage stats for the active clock-loss episode (reset by BLEManager).
+    private(set) var remappedRowsThisSession = 0
+    private(set) var droppedRowsThisSession = 0
+
     /// True while a historical offload session is active.
     private(set) var isBackfilling = false
 
@@ -74,8 +81,16 @@ final class Backfiller {
     /// sends one HISTORY_START then repeated HISTORY_ENDs, so we must accumulate from the outset.
     func begin() {
         isBackfilling = true
+        remappedRowsThisSession = 0
+        droppedRowsThisSession = 0
         chunk.removeAll(keepingCapacity: true)
         chunkOpen = true
+    }
+
+    /// Clear salvage counters without starting a session (after stats are persisted).
+    func resetSalvageStats() {
+        remappedRowsThisSession = 0
+        droppedRowsThisSession = 0
     }
 
     /// Feed one raw BLE frame into the state machine. May trigger async store operations.
@@ -130,7 +145,27 @@ final class Backfiller {
             // truly required to map REALTIME (type-40/43) device-epoch timestamps, never in a hist chunk.
             let ref = clockRef ?? { let now = Int(Date().timeIntervalSince1970); return ClockRef(device: now, wall: now) }()
             let parsed = frames.map { parseFrame($0) }
-            let decoded = extract(parsed, ref.device, ref.wall)
+            var decoded = extract(parsed, ref.device, ref.wall)
+            // CLOCK-LOST salvage: type-47 carries absolute RTC unix. If the strap wrote under a
+            // wrong base, remap before insert so we don't persist 2029 into SQLite/server.
+            let wallNow = Int(Date().timeIntervalSince1970)
+            if let anchor = clockLossAnchor {
+                let result = ClockLossPolicy.remapStreams(decoded, anchor: anchor, wallNow: wallNow)
+                if result.remapped > 0 || result.dropped > 0 {
+                    print("Backfiller: CLOCK-LOST remap remapped=\(result.remapped) dropped=\(result.dropped) Δ=\(anchor.deltaSeconds)s")
+                }
+                remappedRowsThisSession += result.remapped
+                droppedRowsThisSession += result.dropped
+                decoded = result.streams
+            } else {
+                // No active episode — still refuse to insert absurd future timestamps.
+                let scrubbed = ClockLossPolicy.dropInsaneTimestamps(decoded, wallNow: wallNow)
+                if scrubbed.dropped > 0 {
+                    print("Backfiller: dropped \(scrubbed.dropped) rows with insane timestamps (no CLOCK-LOST anchor)")
+                    droppedRowsThisSession += scrubbed.dropped
+                    decoded = scrubbed.streams
+                }
+            }
             let decodedRows = decoded.hr.count + decoded.rr.count + decoded.spo2.count
                 + decoded.skinTemp.count + decoded.resp.count + decoded.gravity.count
                 + decoded.events.count + decoded.battery.count

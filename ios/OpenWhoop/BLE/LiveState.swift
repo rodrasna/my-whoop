@@ -46,6 +46,12 @@ public final class LiveState: ObservableObject {
     /// Short user-facing status while a clock-repair sequence runs.
     @Published public var repairStatus: String?
 
+    /// Active CLOCK-LOST salvage / forensic status (nil when idle).
+    @Published public var clockLossStatus: String?
+
+    /// Wall unix of the latest detected CLOCK-LOST episode (for Device UI).
+    @Published public var lastClockLossDetectedAt: TimeInterval?
+
     /// Optional hook invoked on every battery update (wired by LiveViewModel to the alert monitor).
     /// Kept as a closure so LiveState stays a plain observable snapshot with no alert dependency.
     public var onBatteryUpdate: ((Double) -> Void)?

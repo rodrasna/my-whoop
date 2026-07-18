@@ -64,6 +64,12 @@ public final class BLEManager: NSObject, ObservableObject {
     private var didAutoRepairThisConnection = false
     /// Set when repairStrapClock reboots the strap; the next connect may clear stall for one attempt.
     private var pendingRepairReconnect = false
+    /// After CLOCK-LOST detect: run one remapped salvage offload, then repair.
+    private var pendingRepairAfterSalvage = false
+    private var didSalvageThisClockLoss = false
+    private var salvageDeadline: DispatchWorkItem?
+    /// Max time to wait for salvage offload before forcing SET_CLOCK + reboot.
+    static let clockLossSalvageTimeoutSeconds = 90
     /// Fires if the strap goes silent mid-offload; re-armed on every frame during backfill.
     private var backfillTimeout: DispatchWorkItem?
     /// Periodic opportunistic upload while connected. Without it, upload only fires at connect +
@@ -353,8 +359,8 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// Start a historical-offload session: tell the store machine to begin, flip the routing
     /// flag, kick the strap with sendHistoricalData, and arm the idle timeout.
-    private func beginBackfill() {
-        if state.offloadStalled {
+    private func beginBackfill(forceDespiteStall: Bool = false) {
+        if state.offloadStalled, !forceDespiteStall {
             log("Backfill: blocked — stalled (use Reparar pulsera or Sync now)")
             return
         }
@@ -452,6 +458,10 @@ public final class BLEManager: NSObject, ObservableObject {
         log("Backfill: session ended — reason=\(reason) frames=\(offloadFramesThisSession)")
         noteOffloadOutcome(reason: reason, framesSeen: offloadFramesThisSession)
         offloadFramesThisSession = 0
+        persistClockLossSalvageStats()
+        if pendingRepairAfterSalvage {
+            finishSalvageAndRepair(reason: "after salvage \(reason)")
+        }
         uploadOpportunistically()
         // Read-path sync runs AFTER the offload, never concurrently with it — the offload and the
         // pull share the WhoopStore actor, and a large first-run pull would starve the Backfiller's
@@ -464,6 +474,119 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         flushPendingArmIfNeeded()
         checkStrapLiveness()         // safety-net: strap ahead of us AND our frontier frozen ⇒ stuck?
+    }
+
+    // MARK: - CLOCK-LOST salvage + forensic timeline
+
+    /// Detected future DATA_RANGE: persist an event, arm remap, try one salvage offload, then repair.
+    private func handleClockLost(newest: Int, oldest: Int?, wall: Int, reason: String) {
+        state.strapNeedsReboot = true
+        state.lastClockLossDetectedAt = TimeInterval(wall)
+        state.clockLossStatus = "RTC perdido — intentando recuperar histórico…"
+        log("Clock lost: \(reason) newest=\(newest) wall=\(wall) Δ≈\(newest - wall)s")
+
+        Task { @MainActor in
+            let frontier = try? await whoopStore?.cursor("hist_hr_frontier")
+            let open = try? await whoopStore?.openClockLossEvent(deviceId: deviceId)
+            if open == nil {
+                let event = ClockLossEvent(
+                    deviceId: deviceId,
+                    detectedAt: wall,
+                    strapNewestCorrupt: newest,
+                    strapOldestCorrupt: oldest,
+                    lastGoodFrontier: frontier,
+                    reason: reason)
+                if let id = try? await whoopStore?.insertClockLossEvent(event) {
+                    log("Clock lost: event id=\(id) recorded (frontier=\(frontier.map(String.init) ?? "nil"))")
+                }
+            }
+            let anchor = ClockLossPolicy.anchor(
+                strapNewest: newest,
+                strapOldest: oldest,
+                wallAtDetect: wall,
+                lastGoodFrontier: frontier)
+            backfiller?.clockLossAnchor = anchor
+            startClockLossSalvageThenRepair(reason: reason)
+        }
+    }
+
+    /// One remapped SEND_HISTORICAL attempt, then SET_CLOCK + reboot (even if salvage times out).
+    private func startClockLossSalvageThenRepair(reason: String) {
+        if didSalvageThisClockLoss {
+            log("Clock lost: salvage already tried — repairing (\(reason))")
+            if !scheduleAutoRepairIfNeeded(reason: reason) {
+                state.offloadStalled = true
+                state.clockLossStatus = "RTC perdido — pon la pulsera al cargador"
+            }
+            return
+        }
+        didSalvageThisClockLoss = true
+        pendingRepairAfterSalvage = true
+        state.offloadStalled = false
+        state.consecutiveOffloadTimeouts = 0
+
+        if backfilling {
+            log("Clock lost: offload already running — will repair when it ends")
+        } else {
+            log("Clock lost: starting salvage offload with timestamp remap")
+            beginBackfill(forceDespiteStall: true)
+        }
+
+        salvageDeadline?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.finishSalvageAndRepair(reason: "salvage timeout")
+        }
+        salvageDeadline = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .seconds(BLEManager.clockLossSalvageTimeoutSeconds),
+            execute: item)
+    }
+
+    private func finishSalvageAndRepair(reason: String) {
+        guard pendingRepairAfterSalvage else { return }
+        pendingRepairAfterSalvage = false
+        salvageDeadline?.cancel()
+        salvageDeadline = nil
+        persistClockLossSalvageStats()
+        if backfilling {
+            backfiller?.timeoutFired()
+            exitBackfilling(reason: "salvage-end")
+        }
+        log("Clock lost: salvage done (\(reason)) — repairing RTC")
+        state.clockLossStatus = "RTC perdido — reparando reloj…"
+        if !scheduleAutoRepairIfNeeded(reason: reason) {
+            state.offloadStalled = true
+            state.clockLossStatus = "RTC perdido — pon la pulsera al cargador"
+            log("Clock lost: auto-repair on cooldown after salvage")
+        }
+    }
+
+    private func persistClockLossSalvageStats() {
+        guard let bf = backfiller else { return }
+        let remapped = bf.remappedRowsThisSession
+        let dropped = bf.droppedRowsThisSession
+        guard remapped > 0 || dropped > 0 else { return }
+        log("Clock lost: salvage stats remapped=\(remapped) dropped=\(dropped)")
+        Task { @MainActor in
+            try? await whoopStore?.addClockLossSalvageStats(
+                deviceId: deviceId, remapped: remapped, dropped: dropped)
+            bf.resetSalvageStats()
+        }
+    }
+
+    private func markClockLossRecoveredIfNeeded(wall: Int) {
+        backfiller?.clockLossAnchor = nil
+        didSalvageThisClockLoss = false
+        pendingRepairAfterSalvage = false
+        salvageDeadline?.cancel()
+        salvageDeadline = nil
+        if state.clockLossStatus != nil || state.lastClockLossDetectedAt != nil {
+            state.clockLossStatus = nil
+            log("Clock lost: recovered — DATA_RANGE sane at wall=\(wall)")
+        }
+        Task { @MainActor in
+            try? await whoopStore?.markClockLossRecovered(deviceId: deviceId, recoveredAt: wall)
+        }
     }
 
     /// Incomplete offload streak ⇒ pause auto-sync so the UI stops lying with "Descargando…" for hours.
@@ -479,13 +602,18 @@ public final class BLEManager: NSObject, ObservableObject {
             return
         }
         guard reason == "timeout" else { return }
+        // Salvage offload owns the next repair step — don't double-trigger stall repair.
+        if pendingRepairAfterSalvage {
+            log("Backfill: salvage timeout frames=\(framesSeen) — deferring to salvage→repair")
+            return
+        }
         state.consecutiveOffloadTimeouts += 1
         log("Backfill: incomplete timeout \(state.consecutiveOffloadTimeouts)/\(BLEManager.offloadStallAfterTimeouts) frames=\(framesSeen)")
         if state.consecutiveOffloadTimeouts >= BLEManager.offloadStallAfterTimeouts {
             state.offloadStalled = true
             state.strapNeedsReboot = true
             log("Backfill: STALLED — pausing auto-sync")
-            if !scheduleAutoRepairIfNeeded(reason: "offload stall") {
+            if !scheduleAutoRepairIfNeeded(reason: "offload_stall") {
                 log("Backfill: STALLED — auto-repair on cooldown; put strap on charger")
             }
         }
@@ -951,6 +1079,7 @@ extension BLEManager: CBCentralManagerDelegate {
             pendingRepairReconnect = false
             state.offloadStalled = false
             state.consecutiveOffloadTimeouts = 0
+            didSalvageThisClockLoss = false
             log("Connect: post-repair reconnect — one offload attempt allowed")
         }
         // Allow one auto-repair per connection; cooldown still caps frequency across reconnects.
@@ -1258,18 +1387,15 @@ extension BLEManager: CBPeripheralDelegate {
                     let oldestStr = oldest.map { fmt.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? "n/a"
                     let newestStr = fmt.string(from: Date(timeIntervalSince1970: TimeInterval(newest)))
                     log("DATA_RANGE strap window: oldest=\(oldestStr) newest=\(newestStr)")
-                    // Future markers (2029/2030) ⇒ CLOCK-LOST. Don't feed the watchdog a fake "ahead"
-                    // frontier; prefer auto-repair over a multi-minute timeout loop.
+                    // Future markers (2029/2030) ⇒ CLOCK-LOST. Salvage remapped historical rows
+                    // first (type-47 absolute RTC), then SET_CLOCK + reboot to stop the bleeding.
                     if ClockPolicy.isFutureCorrupt(strapNewest: newest, wallNow: wall) {
                         strapNewestTs = nil
-                        state.strapNeedsReboot = true
-                        log("Clock lost: DATA_RANGE newest in the future vs wall — auto-repair")
-                        if !scheduleAutoRepairIfNeeded(reason: "future DATA_RANGE") {
-                            state.offloadStalled = true
-                            log("Clock lost: auto-repair on cooldown — stalling offload")
-                        }
+                        handleClockLost(newest: newest, oldest: oldest, wall: wall,
+                                        reason: "future_data_range")
                     } else if ClockPolicy.isSaneWallRelative(newest, wallNow: wall) {
                         strapNewestTs = newest
+                        markClockLossRecoveredIfNeeded(wall: wall)
                     } else {
                         // Absurdly old — ignore for watchdog, don't auto-reboot (may be idle strap).
                         strapNewestTs = nil
