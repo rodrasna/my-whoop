@@ -67,6 +67,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// After CLOCK-LOST detect: run one remapped salvage offload, then repair.
     private var pendingRepairAfterSalvage = false
     private var didSalvageThisClockLoss = false
+    /// True while DATA_RANGE (or an open episode) shows an unusable/future strap RTC.
+    /// Survives HISTORY_COMPLETE so we don't clear stall and restart the offload loop.
+    private var rtcKnownCorrupt = false
     private var salvageDeadline: DispatchWorkItem?
     /// Max time to wait for salvage offload before forcing SET_CLOCK + reboot.
     static let clockLossSalvageTimeoutSeconds = 90
@@ -455,8 +458,9 @@ public final class BLEManager: NSObject, ObservableObject {
         backfillTimeout?.cancel()
         backfillTimeout = nil
         backfillFrameQueue.removeAll()
-        log("Backfill: session ended — reason=\(reason) frames=\(offloadFramesThisSession)")
-        noteOffloadOutcome(reason: reason, framesSeen: offloadFramesThisSession)
+        let framesSeen = offloadFramesThisSession
+        log("Backfill: session ended — reason=\(reason) frames=\(framesSeen)")
+        noteOffloadOutcome(reason: reason, framesSeen: framesSeen)
         offloadFramesThisSession = 0
         persistClockLossSalvageStats()
         if pendingRepairAfterSalvage {
@@ -468,7 +472,10 @@ public final class BLEManager: NSObject, ObservableObject {
         // per-chunk insert→ack and trip the 20s offload watchdog. Safe to run now: backfilling=false.
         restoreFromServerIfNeeded()  // once-per-launch: full history restore if the store is empty
         pullFromServer()             // incremental pull: new rows since read-highwater
-        if reason == "HISTORY_COMPLETE" {
+        // Vacuous HISTORY_COMPLETE under corrupt RTC is not a real catch-up — don't paint "Al día".
+        if reason == "HISTORY_COMPLETE",
+           !OffloadStallPolicy.isVacuousHistoryComplete(frames: framesSeen,
+                                                        rtcKnownCorrupt: rtcKnownCorrupt) {
             state.lastSyncedAt = Date().timeIntervalSince1970
             UserDefaults.standard.set(state.lastSyncedAt, forKey: "lastSyncedAt")
         }
@@ -480,6 +487,7 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// Detected future DATA_RANGE: persist an event, arm remap, try one salvage offload, then repair.
     private func handleClockLost(newest: Int, oldest: Int?, wall: Int, reason: String) {
+        rtcKnownCorrupt = true
         state.strapNeedsReboot = true
         state.lastClockLossDetectedAt = TimeInterval(wall)
         state.clockLossStatus = "RTC perdido — intentando recuperar histórico…"
@@ -510,13 +518,22 @@ public final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Pause auto offloads and show the charger hold — used when RTC won't latch after salvage/repair.
+    private func enterClockHold(reason: String) {
+        state.offloadStalled = true
+        state.strapNeedsReboot = true
+        state.clockLossStatus = OffloadStallPolicy.clockHoldStatus
+        log("Clock hold: \(reason) — auto offload paused until DATA_RANGE sane")
+    }
+
     /// One remapped SEND_HISTORICAL attempt, then SET_CLOCK + reboot (even if salvage times out).
     private func startClockLossSalvageThenRepair(reason: String) {
-        if didSalvageThisClockLoss {
-            log("Clock lost: salvage already tried — repairing (\(reason))")
+        if !OffloadStallPolicy.shouldStartSalvage(alreadySalvagedThisEpisode: didSalvageThisClockLoss) {
+            // Already salvaged this episode — do NOT start another offload storm.
+            log("Clock lost: salvage already tried — holding (\(reason))")
+            enterClockHold(reason: reason)
             if !scheduleAutoRepairIfNeeded(reason: reason) {
-                state.offloadStalled = true
-                state.clockLossStatus = "RTC perdido — pon la pulsera al cargador"
+                log("Clock lost: auto-repair on cooldown — charger hold")
             }
             return
         }
@@ -555,9 +572,7 @@ public final class BLEManager: NSObject, ObservableObject {
         log("Clock lost: salvage done (\(reason)) — repairing RTC")
         state.clockLossStatus = "RTC perdido — reparando reloj…"
         if !scheduleAutoRepairIfNeeded(reason: reason) {
-            state.offloadStalled = true
-            state.clockLossStatus = "RTC perdido — pon la pulsera al cargador"
-            log("Clock lost: auto-repair on cooldown after salvage")
+            enterClockHold(reason: "auto-repair on cooldown after salvage")
         }
     }
 
@@ -575,29 +590,49 @@ public final class BLEManager: NSObject, ObservableObject {
     }
 
     private func markClockLossRecoveredIfNeeded(wall: Int) {
+        let inClockEpisode = rtcKnownCorrupt
+            || state.clockLossStatus != nil
+            || state.lastClockLossDetectedAt != nil
+        guard inClockEpisode else { return }
+
+        let heldForClock = state.clockLossStatus != nil
+        rtcKnownCorrupt = false
         backfiller?.clockLossAnchor = nil
         didSalvageThisClockLoss = false
         pendingRepairAfterSalvage = false
         salvageDeadline?.cancel()
         salvageDeadline = nil
-        if state.clockLossStatus != nil || state.lastClockLossDetectedAt != nil {
-            state.clockLossStatus = nil
-            log("Clock lost: recovered — DATA_RANGE sane at wall=\(wall)")
+        state.clockLossStatus = nil
+        // Only lift stall when we were holding for RTC — leave a non-RTC stall alone.
+        if heldForClock {
+            state.offloadStalled = false
+            state.consecutiveOffloadTimeouts = 0
+            state.strapNeedsReboot = false
         }
+        log("Clock lost: recovered — DATA_RANGE sane at wall=\(wall)")
         Task { @MainActor in
             try? await whoopStore?.markClockLossRecovered(deviceId: deviceId, recoveredAt: wall)
         }
     }
 
     /// Incomplete offload streak ⇒ pause auto-sync so the UI stops lying with "Descargando…" for hours.
-    /// Counts ALL timeouts (empty OR partial ~60-frame dribbles) — only HISTORY_COMPLETE clears the stall.
+    /// Counts ALL timeouts (empty OR partial ~60-frame dribbles). HISTORY_COMPLETE clears the stall
+    /// only when RTC is sane — under corrupt RTC it enters charger hold instead of looping.
     /// On stall: auto CLOCK-LOST repair (SET_CLOCK + reboot) when cooldown allows.
     private func noteOffloadOutcome(reason: String, framesSeen: Int) {
         if reason == "HISTORY_COMPLETE" {
             state.consecutiveOffloadTimeouts = 0
-            if state.offloadStalled {
-                state.offloadStalled = false
-                log("Backfill: stall cleared — HISTORY_COMPLETE")
+            if OffloadStallPolicy.shouldClearStallOnHistoryComplete(rtcKnownCorrupt: rtcKnownCorrupt) {
+                if state.offloadStalled {
+                    state.offloadStalled = false
+                    log("Backfill: stall cleared — HISTORY_COMPLETE")
+                }
+            } else {
+                enterClockHold(reason: "HISTORY_COMPLETE while RTC corrupt frames=\(framesSeen)")
+                if OffloadStallPolicy.isVacuousHistoryComplete(frames: framesSeen,
+                                                              rtcKnownCorrupt: true) {
+                    log("Backfill: vacuous HISTORY_COMPLETE under corrupt RTC — not caught up")
+                }
             }
             return
         }
@@ -613,6 +648,9 @@ public final class BLEManager: NSObject, ObservableObject {
             state.offloadStalled = true
             state.strapNeedsReboot = true
             log("Backfill: STALLED — pausing auto-sync")
+            if rtcKnownCorrupt {
+                state.clockLossStatus = OffloadStallPolicy.clockHoldStatus
+            }
             if !scheduleAutoRepairIfNeeded(reason: "offload_stall") {
                 log("Backfill: STALLED — auto-repair on cooldown; put strap on charger")
             }
@@ -1079,8 +1117,9 @@ extension BLEManager: CBCentralManagerDelegate {
             pendingRepairReconnect = false
             state.offloadStalled = false
             state.consecutiveOffloadTimeouts = 0
-            didSalvageThisClockLoss = false
-            log("Connect: post-repair reconnect — one offload attempt allowed")
+            // Keep didSalvageThisClockLoss / rtcKnownCorrupt for this episode. Resetting salvage
+            // here re-armed a second salvage→timeout→stall loop after every soft repair.
+            log("Connect: post-repair reconnect — one offload attempt allowed (episode salvage kept)")
         }
         // Allow one auto-repair per connection; cooldown still caps frequency across reconnects.
         didAutoRepairThisConnection = false
@@ -1391,6 +1430,7 @@ extension BLEManager: CBPeripheralDelegate {
                     // first (type-47 absolute RTC), then SET_CLOCK + reboot to stop the bleeding.
                     if ClockPolicy.isFutureCorrupt(strapNewest: newest, wallNow: wall) {
                         strapNewestTs = nil
+                        rtcKnownCorrupt = true
                         handleClockLost(newest: newest, oldest: oldest, wall: wall,
                                         reason: "future_data_range")
                     } else if ClockPolicy.isSaneWallRelative(newest, wallNow: wall) {

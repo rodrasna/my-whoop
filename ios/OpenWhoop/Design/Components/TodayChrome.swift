@@ -192,6 +192,13 @@ struct StrapStatusButton: View {
                 label: "Reparando reloj"
             )
         }
+        if state.clockLossStatus != nil {
+            return StrapStatusVisual(
+                symbol: "clock.arrow.circlepath",
+                color: WH.Color.recoveryYellow,
+                label: "Reloj perdido"
+            )
+        }
         if state.offloadStalled || state.strapNeedsReboot {
             return StrapStatusVisual(
                 symbol: "exclamationmark.triangle.fill",
@@ -257,24 +264,32 @@ struct StrapStatusButton: View {
 
 struct StallRecoveryBanner: View {
     var timeoutCount: Int
+    /// True when stall is driven by CLOCK-LOST / corrupt DATA_RANGE (not a generic BLE jam).
+    var isClockLoss: Bool = false
     var onRepair: () -> Void
     var onRetrySync: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             HStack(spacing: WH.Spacing.xs) {
-                Image(systemName: "exclamationmark.triangle.fill")
+                Image(systemName: isClockLoss
+                      ? "clock.arrow.circlepath"
+                      : "exclamationmark.triangle.fill")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(WH.Color.recoveryYellow)
-                Text("Descarga atascada")
+                Text(isClockLoss
+                     ? OffloadStallPolicy.clockHoldBannerTitle
+                     : "Descarga atascada")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(WH.Color.textPrimary)
             }
             Text(
-                timeoutCount >= 3
-                ? "La pulsera no terminó la descarga tras \(timeoutCount) intentos. "
-                  + "Repara el reloj (reinicia la pulsera) o ponla en el cargador ~30–60 s."
-                : "La descarga no avanza. Repara el reloj o reintenta cuando la pulsera esté en la muñeca."
+                isClockLoss
+                ? OffloadStallPolicy.clockHoldBannerBody
+                : (timeoutCount >= 3
+                   ? "La pulsera no terminó la descarga tras \(timeoutCount) intentos. "
+                     + "Repara el reloj (reinicia la pulsera) o ponla en el cargador ~30–60 s."
+                   : "La descarga no avanza. Repara el reloj o reintenta cuando la pulsera esté en la muñeca.")
             )
             .font(WH.Font.caption)
             .foregroundStyle(WH.Color.textSecondary)

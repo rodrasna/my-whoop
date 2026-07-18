@@ -166,6 +166,7 @@ struct TodayView: View {
                 if isViewingToday, live.state.offloadStalled {
                     StallRecoveryBanner(
                         timeoutCount: live.state.consecutiveOffloadTimeouts,
+                        isClockLoss: live.state.clockLossStatus != nil,
                         onRepair: { live.repairStrap() },
                         onRetrySync: { live.syncNow() }
                     )
