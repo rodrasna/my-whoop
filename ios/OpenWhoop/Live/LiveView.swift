@@ -237,6 +237,9 @@ private struct LiveContentView: View {
         if state.repairStatus != nil {
             return syncStatusLine(state.repairStatus!, WH.Color.recoveryYellow)
         }
+        if let clockLoss = state.clockLossStatus {
+            return syncStatusLine(clockLoss, WH.Color.recoveryYellow)
+        }
         if state.offloadStalled {
             return syncStatusLine(
                 "Descarga atascada — reparando reloj o pon la pulsera al cargador",

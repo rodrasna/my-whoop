@@ -163,6 +163,24 @@ extension WhoopStore {
                 t.add(column: "sleepScoreBreakdownJSON", .text)
             }
         }
+        migrator.registerMigration("v10") { db in
+            // Forensic timeline of strap RTC (CLOCK-LOST) episodes + salvage counters.
+            try db.create(table: "clockLossEvent") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("deviceId", .text).notNull()
+                t.column("detectedAt", .integer).notNull()
+                t.column("strapNewestCorrupt", .integer).notNull()
+                t.column("strapOldestCorrupt", .integer)
+                t.column("lastGoodFrontier", .integer)
+                t.column("reason", .text).notNull()
+                t.column("recoveredAt", .integer)
+                t.column("remappedRows", .integer).notNull().defaults(to: 0)
+                t.column("droppedRows", .integer).notNull().defaults(to: 0)
+            }
+            try db.create(index: "clockLossEvent_device_detected",
+                          on: "clockLossEvent",
+                          columns: ["deviceId", "detectedAt"])
+        }
         return migrator
     }
 }
