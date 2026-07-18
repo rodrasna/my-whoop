@@ -5,6 +5,7 @@ import WhoopStore
 
 struct MobilityView: View {
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var live: LiveViewModel
     @EnvironmentObject private var tabRouter: RootTabRouter
     @EnvironmentObject private var dayPlanStore: WorkoutDayPlanStore
     @ObservedObject private var prefs = MobilityPreferencesStore.shared
@@ -24,6 +25,7 @@ struct MobilityView: View {
     @State private var showingHistory = false
     @State private var dayWorkouts: [Workout] = []
     @State private var selectedDayMetric: DailyMetric?
+    @State private var showingDevice = false
 
     private var selectedDate: Date { tabRouter.selectedDate }
 
@@ -95,6 +97,14 @@ struct MobilityView: View {
             .sheet(isPresented: $showingHistory) {
                 MobilityHistoryView(completionStore: completionStore)
             }
+            .sheet(isPresented: $showingDevice) {
+                NavigationStack {
+                    LiveView()
+                        .environmentObject(live)
+                        .environmentObject(metrics)
+                }
+                .presentationDragIndicator(.visible)
+            }
             .sheet(isPresented: $showingDayEditor) {
                 DayWorkoutEditorView(
                     dayKey: dayKey,
@@ -155,17 +165,19 @@ struct MobilityView: View {
         let ctx = trainingContext
         return ScrollView {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
-                HStack {
-                    ScreenHeader("Movilidad")
-                    Spacer()
-                    Button {
-                        showingFocusSettings = true
-                    } label: {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 18))
-                            .foregroundStyle(WH.Color.textSecondary)
+                ScreenHeader("Movilidad") {
+                    HStack(spacing: WH.Spacing.sm) {
+                        StrapStatusButton(state: live.state) { showingDevice = true }
+                        Button {
+                            showingFocusSettings = true
+                        } label: {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(WH.Color.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Áreas de foco")
                     }
-                    .accessibilityLabel("Áreas de foco")
                 }
 
                 DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)

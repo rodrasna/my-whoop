@@ -18,7 +18,7 @@ import WhoopStore
 @MainActor
 final class MetricsRepository: ObservableObject {
     @Published private(set) var today: DailyMetric?            // most-recent cached daily row
-    @Published private(set) var lastNight: CachedSleepSession? // most-recent cached sleep session
+    @Published private(set) var lastNight: CachedSleepSession? // sleep session whose wake is today (local)
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastError: String?
     @Published private(set) var lastPRVNSyncError: String?
@@ -133,29 +133,10 @@ final class MetricsRepository: ObservableObject {
         guard let store else { return }
 
         let now = Date()
-        let cal = Calendar(identifier: .gregorian)
-
-        // Fetch last 14 days of daily metrics; take today's row (local calendar day key).
-        if let start = cal.date(byAdding: .day, value: -14, to: now) {
-            let fromDay = Self.localDayString(for: start)
-            let toDay = Self.localDayString(for: now)
-            let rows = (try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay)) ?? []
-            let todayKey = Self.localDayString(for: now)
-            today = rows.last { $0.day == todayKey } ?? rows.last
-        }
-
-        // Fetch last 14 days of sleep sessions; take the most-recent (last) row.
-        let windowStart = Int(now.timeIntervalSince1970) - 14 * 86_400
-        let windowEnd   = Int(now.timeIntervalSince1970) + 86_400   // +1 day buffer
-        let recent = (try? await store.sleepSessions(deviceId: deviceId,
-                                                     from: windowStart,
-                                                     to: windowEnd,
-                                                     limit: 50)) ?? []
-        // Main night only: longest in-bed bout (drops window-edge / sedentary false positives).
-        lastNight = recent
-            .filter { $0.endTs - $0.startTs >= 3 * 3600 }
-            .max(by: { $0.endTs < $1.endTs })
-            ?? recent.last
+        let todayKey = MetricsRepository.localDayString(for: now)
+        // WHOOP semantics: "last night" on Hoy = the bout that ended this local wake-morning.
+        lastNight = await sleepSession(endingOnDay: todayKey)
+        today = await dailyMetricForWakeDay(localDay: todayKey, session: lastNight)
     }
 
     // MARK: - Refresh from server then reload
@@ -210,9 +191,34 @@ final class MetricsRepository: ObservableObject {
                            toDay: Self.localDayString(for: anchor, calendar: calendar))
     }
 
-    /// Single daily row for a UTC calendar day.
+    /// Single daily row for a calendar day key (YYYY-MM-DD).
     func dailyMetric(forDay day: String) async -> DailyMetric? {
         await daily(fromDay: day, toDay: day).first
+    }
+
+    /// Match the server ``daily`` row for a **local wake-day**. Only pairs a row when we can
+    /// tie it to that night's session (UTC wake-day of ``endTs``) or an exact day-key hit —
+    /// never steal a neighbour day's row (that duplicated scores across the day picker).
+    func dailyMetricForWakeDay(localDay: String, session: CachedSleepSession?) async -> DailyMetric? {
+        if let session, Self.localDayString(fromEpoch: session.endTs) == localDay {
+            let utcWake = Self.utcDayString(fromEpoch: session.endTs)
+            if let row = await dailyMetric(forDay: utcWake), Self.hasSleepMetrics(row) {
+                return row
+            }
+        }
+        if let row = await dailyMetric(forDay: localDay), Self.hasSleepMetrics(row) {
+            return row
+        }
+        return nil
+    }
+
+    nonisolated private static func hasSleepMetrics(_ row: DailyMetric) -> Bool {
+        (row.totalSleepMin ?? 0) > 0
+            || (row.efficiency ?? 0) > 0
+            || (row.sleepScore ?? 0) > 0
+            || row.deepMin != nil
+            || row.remMin != nil
+            || row.lightMin != nil
     }
 
     /// Among sessions, keep the longest **main** bout per local wake-day (`endTs`).
@@ -257,6 +263,22 @@ final class MetricsRepository: ObservableObject {
         return pool.max(by: { ($0.endTs - $0.startTs) < ($1.endTs - $1.startTs) })
     }
 
+    /// Fallback when local wake-day misses but the server daily row exists (UTC wake-day key).
+    private func sleepSession(matchingServerWakeDay serverDay: String, nearLocalDay localDay: String) async -> CachedSleepSession? {
+        await ensureOpen()
+        guard let store, let anchor = Self.parseLocalDay(localDay) else { return nil }
+        let cal = Calendar.current
+        guard let fromDate = cal.date(byAdding: .day, value: -1, to: anchor),
+              let toDate = cal.date(byAdding: .day, value: 2, to: anchor) else { return nil }
+        let from = Int(fromDate.timeIntervalSince1970)
+        let to = Int(toDate.timeIntervalSince1970)
+        let candidates = (try? await store.sleepSessions(deviceId: deviceId, from: from, to: to, limit: 40)) ?? []
+        let pool = candidates.filter {
+            !$0.isNap && Self.utcDayString(fromEpoch: $0.endTs) == serverDay
+        }
+        return pool.max(by: { ($0.endTs - $0.startTs) < ($1.endTs - $1.startTs) })
+    }
+
     /// Siestas / descanso etiquetados como ``nap`` para el día de despertar `day`.
     func naps(endingOnDay day: String) async -> [CachedSleepSession] {
         let onDay = await sessionsEndingOnDay(day)
@@ -292,6 +314,11 @@ final class MetricsRepository: ObservableObject {
     /// UTC `yyyy-MM-dd` for the instant of local start-of-day (legacy sleep/window keys).
     nonisolated static func utcDayString(for date: Date, calendar: Calendar = .current) -> String {
         dayString(fromEpoch: Int(calendar.startOfDay(for: date).timeIntervalSince1970))
+    }
+
+    /// UTC calendar day for an instant — matches server sleep/daily attribution (`end_ts` date).
+    nonisolated static func utcDayString(fromEpoch epoch: Int) -> String {
+        dayString(fromEpoch: epoch)
     }
 
     nonisolated private static func dayString(fromEpoch epoch: Int) -> String {
@@ -510,18 +537,33 @@ final class MetricsRepository: ObservableObject {
 
     // MARK: - Sleep tab reads (M2)
 
-    /// Night detail for a calendar day (local day key). Prefer over `sleepDetail()` when the UI has a day picker.
-    func sleepDetail(for date: Date) async -> (session: CachedSleepSession, daily: DailyMetric?)? {
+    /// Unified session + daily for one local wake-day (Hoy / Sueño day picker).
+    func nightContext(for date: Date) async -> (session: CachedSleepSession?, daily: DailyMetric?) {
         await ensureOpen()
         let dayKey = Self.localDayString(for: date)
-        guard let session = await sleepSession(endingOnDay: dayKey) else { return nil }
-        let daily = await dailyMetric(forDay: dayKey)
-        return (session: session, daily: daily)
+        var session = await sleepSession(endingOnDay: dayKey)
+        var daily = await dailyMetricForWakeDay(localDay: dayKey, session: session)
+        if session == nil, let matchedDaily = daily {
+            session = await sleepSession(matchingServerWakeDay: matchedDaily.day, nearLocalDay: dayKey)
+            if session != nil {
+                daily = await dailyMetricForWakeDay(localDay: dayKey, session: session) ?? matchedDaily
+            }
+        }
+        if daily == nil, let session {
+            daily = await dailyMetricForWakeDay(localDay: dayKey, session: session)
+        }
+        return (session, daily)
     }
 
-    /// Returns the most-recent sleep session paired with the `DailyMetric` for the day its
-    /// `endTs` falls on (local calendar day), or nil when there are no cached sessions.
-    func sleepDetail() async -> (session: CachedSleepSession, daily: DailyMetric?)? {
+    /// Night detail for a calendar day (local wake-day). Returns nil only when both are absent.
+    func sleepDetail(for date: Date) async -> (session: CachedSleepSession?, daily: DailyMetric?)? {
+        let ctx = await nightContext(for: date)
+        if ctx.session == nil && ctx.daily == nil { return nil }
+        return ctx
+    }
+
+    /// Returns sleep session + daily row for today (local wake-day), when either exists.
+    func sleepDetail() async -> (session: CachedSleepSession?, daily: DailyMetric?)? {
         await sleepDetail(for: Date())
     }
 

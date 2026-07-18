@@ -179,8 +179,13 @@ public final class LiveViewModel: ObservableObject {
     /// Refresh the storage summary line from the store (polled every few seconds by LiveView).
     public func refreshStorage() {
         Task { @MainActor in
-            guard let s = await ble.storageStats() else { storageSummary = "stored: —"; return }
+            guard let s = await ble.storageStats() else {
+                storageSummary = "stored: —"
+                state.pendingHrUpload = 0
+                return
+            }
             let mb = Double(s.rawBytes) / (1024 * 1024)
+            state.pendingHrUpload = s.pendingHR
             storageSummary = String(format: "HR %d almac · %d pend · total %d · %.1f MB raw",
                                     s.hrTotal, s.pendingHR, s.decodedRows, mb)
         }

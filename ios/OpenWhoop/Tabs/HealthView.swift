@@ -6,12 +6,14 @@ import WhoopStore
 
 struct HealthView: View {
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var live: LiveViewModel
     @EnvironmentObject private var tabRouter: RootTabRouter
 
     @State private var baselines = BaselineCalculator.Averages()
     @State private var thirtyDayRows: [DailyMetric] = []
     @State private var weekPoints: [MetricKind: [TrendPoint]] = [:]
     @State private var selectedDayMetric: DailyMetric?
+    @State private var showingDevice = false
 
     private var selectedDate: Date { tabRouter.selectedDate }
 
@@ -30,7 +32,9 @@ struct HealthView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: WH.Spacing.lg) {
-                        ScreenHeader("Salud")
+                        ScreenHeader("Salud") {
+                            StrapStatusButton(state: live.state) { showingDevice = true }
+                        }
                         DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)
                             .padding(.horizontal, WH.Spacing.md)
                             .padding(.top, -WH.Spacing.sm)
@@ -56,6 +60,14 @@ struct HealthView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showingDevice) {
+                NavigationStack {
+                    LiveView()
+                        .environmentObject(live)
+                        .environmentObject(metrics)
+                }
+                .presentationDragIndicator(.visible)
+            }
         }
         .preferredColorScheme(.dark)
         .task {
@@ -279,5 +291,6 @@ struct HealthView: View {
 #Preview {
     HealthView()
         .environmentObject(MetricsRepository(deviceId: "preview"))
+        .environmentObject(LiveViewModel())
         .environmentObject(RootTabRouter())
 }

@@ -43,26 +43,53 @@ final class MetricsRepositoryTests: XCTestCase {
         return sessions
     }
 
-    // MARK: - load() sets today / lastNight to most-recent rows
+    // MARK: - load() pairs today / lastNight to this local wake-morning
 
-    func testLoadSetsTodayToMostRecentDailyRow() async throws {
+    func testLoadSetsTodayToWakeDayDailyRow() async throws {
         let store = try await WhoopStore.inMemory()
         let repo = makeRepo(store: store)
-        let days = try await seedDaily(store)
+
+        let now = Date()
+        let cal = Calendar.current
+        let todayStart = cal.startOfDay(for: now)
+        let endTs = Int(todayStart.timeIntervalSince1970) + 7 * 3600
+        let startTs = endTs - 7 * 3600
+        let utcWake = MetricsRepository.utcDayString(fromEpoch: endTs)
+
+        let session = CachedSleepSession(
+            startTs: startTs, endTs: endTs,
+            efficiency: 0.90, restingHr: 52, avgHrv: 65, stagesJSON: nil
+        )
+        let daily = DailyMetric(
+            day: utcWake, totalSleepMin: 430, efficiency: 0.90,
+            deepMin: 90, remMin: 110, lightMin: 230, disturbances: 1,
+            restingHr: 52, avgHrv: 65, recovery: 0.75, strain: 12, exerciseCount: 0
+        )
+        try await store.upsertSleepSessions([session], deviceId: "test-device")
+        try await store.upsertDailyMetrics([daily], deviceId: "test-device")
 
         await repo.load()
 
-        XCTAssertEqual(repo.today, days.last, "today must be the most-recent (last) daily row")
+        XCTAssertEqual(repo.lastNight, session)
+        XCTAssertEqual(repo.today?.day, utcWake)
+        XCTAssertEqual(repo.today?.recovery, 0.75)
     }
 
-    func testLoadSetsLastNightToMostRecentSleepSession() async throws {
+    func testLoadIgnoresStaleSessionFromPreviousWakeDay() async throws {
         let store = try await WhoopStore.inMemory()
         let repo = makeRepo(store: store)
-        let sessions = try await seedSleep(store)
+
+        let now = Int(Date().timeIntervalSince1970)
+        let stale = CachedSleepSession(
+            startTs: now - 1 * 86_400, endTs: now - 1 * 86_400 + 27_000,
+            efficiency: 0.99, restingHr: 50, avgHrv: 70, stagesJSON: nil
+        )
+        try await store.upsertSleepSessions([stale], deviceId: "test-device")
 
         await repo.load()
 
-        XCTAssertEqual(repo.lastNight, sessions.last, "lastNight must be the most-recent sleep session")
+        XCTAssertNil(repo.lastNight, "must not surface yesterday's bout as today's lastNight")
+        XCTAssertNil(repo.today)
     }
 
     func testLoadReturnsNilWhenCacheEmpty() async throws {
@@ -149,7 +176,8 @@ final class MetricsRepositoryTests: XCTestCase {
                                      restingHr: 60, avgHrv: 45, recovery: 0.50, strain: 15, exerciseCount: 2)
         try await store.upsertDailyMetrics([daily, otherDaily], deviceId: "test-device")
 
-        let result = await repo.sleepDetail()
+        let wakeDate = Date(timeIntervalSince1970: TimeInterval(s2.endTs))
+        let result = await repo.sleepDetail(for: wakeDate)
 
         XCTAssertNotNil(result, "sleepDetail must return a result when sessions exist")
         XCTAssertEqual(result?.session, s2, "sleepDetail must return the latest session")
@@ -179,10 +207,116 @@ final class MetricsRepositoryTests: XCTestCase {
         try await store.upsertSleepSessions([session], deviceId: "test-device")
         // Intentionally do NOT seed any daily row.
 
-        let result = await repo.sleepDetail()
+        let wakeDate = Date(timeIntervalSince1970: TimeInterval(session.endTs))
+        let result = await repo.sleepDetail(for: wakeDate)
         XCTAssertNotNil(result, "sleepDetail returns the session even without a daily row")
         XCTAssertEqual(result?.session, session)
         XCTAssertNil(result?.daily, "daily must be nil when no matching row exists")
+    }
+
+    func testSleepDetailPairsUtcDailyRowWhenLocalWakeDayDiffers() async throws {
+        let store = try await WhoopStore.inMemory()
+        let repo = makeRepo(store: store)
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Europe/Madrid")!
+        var comps = DateComponents()
+        comps.year = 2026
+        comps.month = 7
+        comps.day = 15
+        comps.hour = 1
+        comps.minute = 0
+        let wakeLocal = try XCTUnwrap(cal.date(from: comps))
+        let endTs = Int(wakeLocal.timeIntervalSince1970)
+        let startTs = endTs - 7 * 3600
+
+        let session = CachedSleepSession(
+            startTs: startTs, endTs: endTs,
+            efficiency: 0.88, restingHr: 53, avgHrv: 62,
+            stagesJSON: "[{\"start\":\(startTs),\"end\":\(endTs),\"stage\":\"light\"}]"
+        )
+        try await store.upsertSleepSessions([session], deviceId: "test-device")
+
+        let utcWakeDay = MetricsRepository.utcDayString(fromEpoch: endTs)
+        XCTAssertEqual(utcWakeDay, "2026-07-14", "01:00 Madrid still counts as prior UTC wake-day")
+
+        let daily = DailyMetric(
+            day: utcWakeDay, totalSleepMin: 420, efficiency: 0.88,
+            deepMin: 80, remMin: 95, lightMin: 245, disturbances: 1,
+            restingHr: 53, avgHrv: 62, recovery: 0.78, strain: 9, exerciseCount: 0
+        )
+        try await store.upsertDailyMetrics([daily], deviceId: "test-device")
+
+        let result = await repo.sleepDetail(for: wakeLocal)
+        XCTAssertEqual(result?.session, session)
+        XCTAssertEqual(result?.daily?.day, utcWakeDay)
+        XCTAssertEqual(result?.daily?.totalSleepMin, 420)
+    }
+
+    func testSleepDetailReturnsDailyWhenSessionMissing() async throws {
+        let store = try await WhoopStore.inMemory()
+        let repo = makeRepo(store: store)
+
+        let daily = DailyMetric(
+            day: "2026-07-15", totalSleepMin: 400, efficiency: 0.88,
+            deepMin: 70, remMin: 90, lightMin: 240, disturbances: 2,
+            restingHr: 54, avgHrv: 58, recovery: 0.72, strain: 8, exerciseCount: 0
+        )
+        try await store.upsertDailyMetrics([daily], deviceId: "test-device")
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Europe/Madrid")!
+        var comps = DateComponents()
+        comps.year = 2026
+        comps.month = 7
+        comps.day = 15
+        comps.hour = 12
+        let noon = try XCTUnwrap(cal.date(from: comps))
+
+        let result = await repo.sleepDetail(for: noon)
+        XCTAssertNil(result?.session)
+        XCTAssertEqual(result?.daily?.day, "2026-07-15")
+    }
+
+    func testWakeDaysDoNotShareSameDailyRow() async throws {
+        let store = try await WhoopStore.inMemory()
+        let repo = makeRepo(store: store)
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Europe/Madrid")!
+
+        func night(on day: Int, hour: Int) throws -> (CachedSleepSession, DailyMetric, Date) {
+            var comps = DateComponents()
+            comps.year = 2026; comps.month = 7; comps.day = day; comps.hour = hour
+            let wake = try XCTUnwrap(cal.date(from: comps))
+            let endTs = Int(wake.timeIntervalSince1970)
+            let startTs = endTs - 7 * 3600
+            let utcDay = MetricsRepository.utcDayString(fromEpoch: endTs)
+            let session = CachedSleepSession(
+                startTs: startTs, endTs: endTs,
+                efficiency: day == 14 ? 0.88 : 0.62,
+                restingHr: 54, avgHrv: 55, stagesJSON: nil
+            )
+            let daily = DailyMetric(
+                day: utcDay,
+                totalSleepMin: day == 14 ? 420 : 310,
+                efficiency: day == 14 ? 0.88 : 0.62,
+                deepMin: 70, remMin: 80, lightMin: 200, disturbances: day == 14 ? 1 : 4,
+                restingHr: 54, avgHrv: 55, recovery: 0.7, strain: 8, exerciseCount: 0
+            )
+            return (session, daily, wake)
+        }
+
+        let (s14, d14, wake14) = try night(on: 14, hour: 7)
+        let (s15, d15, wake15) = try night(on: 15, hour: 7)
+        try await store.upsertSleepSessions([s14, s15], deviceId: "test-device")
+        try await store.upsertDailyMetrics([d14, d15], deviceId: "test-device")
+
+        let r14 = await repo.sleepDetail(for: wake14)
+        let r15 = await repo.sleepDetail(for: wake15)
+        XCTAssertEqual(r14?.daily?.efficiency, 0.88)
+        XCTAssertEqual(r15?.daily?.efficiency, 0.62)
+        XCTAssertNotEqual(r14?.daily?.day, r15?.daily?.day)
     }
 
     // MARK: - sevenNightSleepWake() count + ordering
@@ -246,7 +380,8 @@ final class MetricsRepositoryTests: XCTestCase {
         await repo.refresh()
 
         XCTAssertFalse(repo.isRefreshing, "isRefreshing must be false after refresh completes")
-        XCTAssertNotNil(repo.today, "refresh must still populate today from cache")
-        XCTAssertNotNil(repo.lastNight, "refresh must still populate lastNight from cache")
+        // seedSleep only has past nights — today/lastNight stay nil until a bout ends this morning.
+        XCTAssertNil(repo.today)
+        XCTAssertNil(repo.lastNight)
     }
 }

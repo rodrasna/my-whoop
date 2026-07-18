@@ -13,6 +13,7 @@ import WhoopStore
 
 struct TrendsView: View {
     @EnvironmentObject private var metrics: MetricsRepository
+    @EnvironmentObject private var live: LiveViewModel
 
     // MARK: - State
 
@@ -28,6 +29,7 @@ struct TrendsView: View {
     @State private var rows: [DailyMetric] = []
     @State private var isLoading = true
     @State private var selectedDay: SelectedDay?
+    @State private var showingDevice = false
 
     // MARK: - Raw HR card state (last 24h, loaded independently of the daily range)
     @State private var hrPoints: [TrendPoint] = []
@@ -51,6 +53,14 @@ struct TrendsView: View {
             }
             // Hide the system nav bar on the root; pushed detail views manage their own bars.
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showingDevice) {
+                NavigationStack {
+                    LiveView()
+                        .environmentObject(live)
+                        .environmentObject(metrics)
+                }
+                .presentationDragIndicator(.visible)
+            }
         }
         .preferredColorScheme(.dark)
         .task {
@@ -159,7 +169,9 @@ struct TrendsView: View {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
                 // Custom tight header (replaces the hidden system large-title nav bar)
-                ScreenHeader("Tendencias")
+                ScreenHeader("Tendencias") {
+                    StrapStatusButton(state: live.state) { showingDevice = true }
+                }
 
                 rangePicker
 
@@ -443,4 +455,5 @@ struct TrendsView: View {
 #Preview("Trends — empty") {
     TrendsView()
         .environmentObject(MetricsRepository(deviceId: "preview"))
+        .environmentObject(LiveViewModel())
 }

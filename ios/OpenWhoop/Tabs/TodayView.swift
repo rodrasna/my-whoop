@@ -91,22 +91,17 @@ struct TodayView: View {
     }
 
     private var dayMetric: DailyMetric? {
-        isViewingToday ? metrics.today : selectedDayMetric
+        selectedDayMetric ?? (isViewingToday ? metrics.today : nil)
     }
 
     private var nightSleep: CachedSleepSession? {
-        isViewingToday ? metrics.lastNight : selectedNightSleep
+        selectedNightSleep ?? (isViewingToday ? metrics.lastNight : nil)
     }
 
     private func reloadSelectedDay() async {
-        if isViewingToday {
-            selectedDayMetric = nil
-            selectedNightSleep = metrics.lastNight
-        } else {
-            let day = MetricsRepository.localDayString(for: selectedDate)
-            selectedDayMetric = await metrics.dailyMetric(forDay: day)
-            selectedNightSleep = await metrics.sleepSession(endingOnDay: day)
-        }
+        let ctx = await metrics.nightContext(for: selectedDate)
+        selectedDayMetric = ctx.daily
+        selectedNightSleep = ctx.session
         stressPoints = await metrics.stressPoints(for: selectedDate)
     }
 
@@ -152,17 +147,29 @@ struct TodayView: View {
     }
 
     private var todaySleepEfficiencyPct: Double? {
-        TodayMetricHelpers.sleepScorePercent(daily: dayMetric, sleep: nightSleep)
+        TodayMetricHelpers.sleepScorePercent(
+            daily: dayMetric,
+            sleep: nightSleep,
+            wakeDayKey: MetricsRepository.localDayString(for: selectedDate)
+        )
     }
 
     private var scrollContent: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
                 // Day navigator + strap status (official-style top chrome)
                 TodayTopBar(selectedDate: $tabRouter.selectedDate,
                             liveState: live.state,
                             onDeviceTap: { showingDevice = true })
+
+                if isViewingToday, live.state.offloadStalled {
+                    StallRecoveryBanner(
+                        timeoutCount: live.state.consecutiveOffloadTimeouts,
+                        onRepair: { live.repairStrap() },
+                        onRetrySync: { live.syncNow() }
+                    )
+                }
 
                 if isViewingToday {
                     suenoEstaNocheCard
@@ -260,6 +267,16 @@ struct TodayView: View {
         return noSleep && noRecovery
     }
 
+    /// Cached daily row for the calendar day before `selectedDate`, when it has sleep metrics.
+    private var yesterdaySleepRow: DailyMetric? {
+        let cal = Calendar.current
+        guard let yesterday = cal.date(byAdding: .day, value: -1, to: selectedDate) else { return nil }
+        let key = MetricsRepository.localDayString(for: yesterday)
+        return weekRows.first { row in
+            row.day == key && TodayMetricHelpers.sleepScorePercent(daily: row) != nil
+        }
+    }
+
     private var demoPreviewBanner: some View {
         HStack(spacing: WH.Spacing.sm) {
             Image(systemName: "sparkles")
@@ -280,13 +297,21 @@ struct TodayView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(WH.Color.recoveryYellow)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Sincroniza por la mañana")
+                Text("Sin datos de la noche que terminó esta mañana")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundStyle(WH.Color.textPrimary)
-                Text("El sueño aparece cuando abres OpenWhoop tras dormir, conectas el strap (Dispositivo) y dejas sincronizar. La app oficial no comparte datos con tu servidor.")
-                    .font(WH.Font.caption)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let row = yesterdaySleepRow,
+                   let pct = TodayMetricHelpers.sleepScorePercent(daily: row) {
+                    Text("La última noche procesada está en Ayer (sueño \(Int(pct.rounded()))%). «Hoy» solo muestra el despertar de esta mañana — aún no ha llegado del strap.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("«Hoy» = despertar de esta mañana. Conecta el strap (Dispositivo), espera la sincronización y desliza hacia abajo para actualizar.")
+                        .font(WH.Font.caption)
+                        .foregroundStyle(WH.Color.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(WH.Spacing.md)
@@ -587,7 +612,11 @@ struct TodayView: View {
 
     /// Calificación compuesta del sueño (servidor) con fallback a eficiencia / horas.
     private var sleepFraction: Double? {
-        TodayMetricHelpers.sleepScoreFraction(daily: dayMetric, sleep: nightSleep)
+        TodayMetricHelpers.sleepScoreFraction(
+            daily: dayMetric,
+            sleep: nightSleep,
+            wakeDayKey: MetricsRepository.localDayString(for: selectedDate)
+        )
     }
 
     private var stressMonitorPlaceholder: some View {

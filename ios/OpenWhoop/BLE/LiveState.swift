@@ -30,6 +30,22 @@ public final class LiveState: ObservableObject {
     /// came — i.e. caught up). Drives the sync tile + the staleness nudge.
     @Published public var lastSyncedAt: TimeInterval?
 
+    /// True while a type-47 historical offload is draining the strap (may take several minutes).
+    @Published public var isOffloading = false
+
+    /// True after several empty offload timeouts in a row: the strap accepted SEND_HISTORICAL but
+    /// never streamed HISTORY frames. Auto-sync pauses; UI should NOT keep saying "Descargando…".
+    @Published public var offloadStalled = false
+
+    /// Consecutive empty offload timeouts (no HISTORY frames). Reset on progress / complete.
+    @Published public var consecutiveOffloadTimeouts = 0
+
+    /// HR rows waiting to POST to the server (`synced = 0` in the local store).
+    @Published public var pendingHrUpload = 0
+
+    /// Short user-facing status while a clock-repair sequence runs.
+    @Published public var repairStatus: String?
+
     /// Optional hook invoked on every battery update (wired by LiveViewModel to the alert monitor).
     /// Kept as a closure so LiveState stays a plain observable snapshot with no alert dependency.
     public var onBatteryUpdate: ((Double) -> Void)?

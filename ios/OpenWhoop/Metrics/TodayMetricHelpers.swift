@@ -109,16 +109,24 @@ enum TodayMetricHelpers {
     }
 
     /// Composite sleep score 0–100 for rings and hero (falls back to efficiency / duration).
-    static func sleepScorePercent(daily: DailyMetric?, sleep: CachedSleepSession? = nil) -> Double? {
+    /// Pass ``wakeDayKey`` (local yyyy-MM-dd) so a stale session from another morning is ignored.
+    static func sleepScorePercent(daily: DailyMetric?, sleep: CachedSleepSession? = nil,
+                                  wakeDayKey: String? = nil) -> Double? {
+        let sleepForDay: CachedSleepSession? = {
+            guard let sleep else { return nil }
+            guard let wakeDayKey else { return sleep }
+            return MetricsRepository.localDayString(fromEpoch: sleep.endTs) == wakeDayKey ? sleep : nil
+        }()
         if let s = daily?.sleepScore, s > 0 { return s }
         if let e = daily?.efficiency, e > 0 { return e * 100 }
-        if let e = sleep?.efficiency, e > 0 { return e * 100 }
+        if let e = sleepForDay?.efficiency, e > 0 { return e * 100 }
         if let m = daily?.totalSleepMin, m > 0 { return min(100, m / 480 * 100) }
         return nil
     }
 
-    static func sleepScoreFraction(daily: DailyMetric?, sleep: CachedSleepSession? = nil) -> Double? {
-        sleepScorePercent(daily: daily, sleep: sleep).map { $0 / 100.0 }
+    static func sleepScoreFraction(daily: DailyMetric?, sleep: CachedSleepSession? = nil,
+                                   wakeDayKey: String? = nil) -> Double? {
+        sleepScorePercent(daily: daily, sleep: sleep, wakeDayKey: wakeDayKey).map { $0 / 100.0 }
     }
 
     // MARK: - Sleep duration (una sola fuente para toda la app)

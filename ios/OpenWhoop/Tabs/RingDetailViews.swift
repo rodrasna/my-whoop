@@ -15,7 +15,7 @@ struct SleepRingDetailView: View {
 
     @EnvironmentObject private var metrics: MetricsRepository
     @EnvironmentObject private var tabRouter: RootTabRouter
-    @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
+    @State private var detail: (session: CachedSleepSession?, daily: DailyMetric?)?
     @State private var weekRows: [DailyMetric] = []
     @State private var weekNights: [CachedSleepSession] = []
 
@@ -50,7 +50,11 @@ struct SleepRingDetailView: View {
                     }
 
                     if let detail {
-                        sleepMetricsCard(session: detail.session, daily: detail.daily)
+                        if let session = detail.session {
+                            sleepMetricsCard(session: session, daily: detail.daily)
+                        } else if let daily = detail.daily {
+                            dailyOnlySleepMetricsCard(daily: daily)
+                        }
                     }
 
                     ringWeekChart(
@@ -86,14 +90,7 @@ struct SleepRingDetailView: View {
     }
 
     private func load() async {
-        let dayKey = MetricsRepository.localDayString(for: anchorDate)
-        let sleep = await metrics.sleepSession(endingOnDay: dayKey)
-        let daily = await metrics.dailyMetric(forDay: dayKey)
-        if let sleep {
-            detail = (session: sleep, daily: daily)
-        } else {
-            detail = nil
-        }
+        detail = await metrics.sleepDetail(for: anchorDate)
         weekRows = await metrics.dailyLastDays(7, endingOn: anchorDate)
         weekNights = await metrics.sevenNightSleepWake(nights: 7)
     }
@@ -114,9 +111,13 @@ struct SleepRingDetailView: View {
     }
 
     private func sleepMetricsCard(session: CachedSleepSession, daily: DailyMetric?) -> some View {
-        DashboardCard {
+        let resting = TodayMetricHelpers.restingHr(sleep: session, daily: daily)
+        let hrv = TodayMetricHelpers.hrvMs(sleep: session, daily: daily)
+        return DashboardCard {
             metricRow(label: "Tiempo dormido",
-                      value: formatMinutes(daily?.totalSleepMin ?? Double(session.endTs - session.startTs) / 60),
+                      value: formatMinutes(TodayMetricHelpers.sleepNightDurations(daily: daily, session: session)?.asleepMin
+                                           ?? daily?.totalSleepMin
+                                           ?? Double(session.endTs - session.startTs) / 60),
                       subtitle: TodayMetricHelpers.sleepWindowLabel(sleep: session))
             DashboardDivider()
             metricRow(label: "Eficiencia",
@@ -125,12 +126,32 @@ struct SleepRingDetailView: View {
                       subtitle: "de esta noche")
             DashboardDivider()
             metricRow(label: "VFC",
-                      value: session.avgHrv.map { String(format: "%.0f ms", $0) } ?? "—",
+                      value: hrv.map { String(format: "%.0f ms", $0) } ?? "—",
                       subtitle: "durante el sueño")
             DashboardDivider()
             metricRow(label: "FC en reposo",
-                      value: session.restingHr.map { "\($0) lpm" } ?? "—",
+                      value: resting.map { "\($0) lpm" } ?? "—",
                       subtitle: "durante el sueño")
+        }
+    }
+
+    private func dailyOnlySleepMetricsCard(daily: DailyMetric) -> some View {
+        DashboardCard {
+            metricRow(label: "Tiempo dormido",
+                      value: formatMinutes(daily.totalSleepMin ?? 0),
+                      subtitle: "agregado del servidor")
+            DashboardDivider()
+            metricRow(label: "Eficiencia",
+                      value: daily.efficiency.map { "\(Int(($0 * 100).rounded()))%" } ?? "—",
+                      subtitle: "de esta noche")
+            DashboardDivider()
+            metricRow(label: "VFC",
+                      value: daily.avgHrv.map { String(format: "%.0f ms", $0) } ?? "—",
+                      subtitle: "media nocturna")
+            DashboardDivider()
+            metricRow(label: "FC en reposo",
+                      value: daily.restingHr.map { "\($0) lpm" } ?? "—",
+                      subtitle: "media nocturna")
         }
     }
 }

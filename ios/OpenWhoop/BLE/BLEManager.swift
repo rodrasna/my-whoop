@@ -53,6 +53,17 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Newest record unix the strap reports having (from the GET_DATA_RANGE response); refreshed each
     /// offload. Compared against our frontier to tell "stuck" from "off-wrist/caught-up".
     private var strapNewestTs: Int?
+    /// Offload frames (47/48/49/50) seen in the current session — empty + timeout ⇒ stall candidate.
+    private var offloadFramesThisSession = 0
+    /// After this many consecutive empty timeouts, pause auto-sync and surface a clear stall state.
+    static let offloadStallAfterTimeouts = 3
+    /// Auto CLOCK-LOST repair (SET_CLOCK + reboot) at most once per connection, and not more often
+    /// than this cooldown (survives reconnect storms when RTC won't latch).
+    static let autoRepairCooldownSeconds: TimeInterval = 600
+    static let autoRepairLastAtKey = "autoRepairLastAt"
+    private var didAutoRepairThisConnection = false
+    /// Set when repairStrapClock reboots the strap; the next connect may clear stall for one attempt.
+    private var pendingRepairReconnect = false
     /// Fires if the strap goes silent mid-offload; re-armed on every frame during backfill.
     private var backfillTimeout: DispatchWorkItem?
     /// Periodic opportunistic upload while connected. Without it, upload only fires at connect +
@@ -214,9 +225,14 @@ public final class BLEManager: NSObject, ObservableObject {
     private func drainPendingUploadsIfAny() async {
         guard let store = whoopStore else { return }
         if let stats = try? await store.hrUploadStats(deviceId: deviceId), stats.pending > 0 {
+            state.pendingHrUpload = stats.pending
             log("Upload drain: \(stats.pending) HR rows pending")
-            uploadOpportunistically()
+        } else {
+            state.pendingHrUpload = 0
         }
+        // Always kick drain: gravity/skin/resp can still be pending after HR hits zero,
+        // and sleep detection on the server needs gravity.
+        uploadOpportunistically()
     }
 
     /// Designated initializer for testing and preview use: accepts a pre-built Collector.
@@ -338,6 +354,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Start a historical-offload session: tell the store machine to begin, flip the routing
     /// flag, kick the strap with sendHistoricalData, and arm the idle timeout.
     private func beginBackfill() {
+        if state.offloadStalled {
+            log("Backfill: blocked — stalled (use Reparar pulsera or Sync now)")
+            return
+        }
         // Never offload before the connect handshake has run: a racing foreground/restore trigger
         // firing SEND_HISTORICAL ahead of hello/SET_CLOCK was part of the storm that stopped serving.
         guard connectHandshakeDone else {
@@ -352,6 +372,8 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         backfiller.begin()
         backfilling = true
+        offloadFramesThisSession = 0
+        state.isOffloading = true
         // Payload MUST be [0x00], NOT empty: verified on-device that this strap serves type-47 only with
         // [0x00] (empty → 0 frames on a clean stable link with ~2k records pending); the Mac ground-truth
         // offload (re/sync_openwhoop.py, re/diagnose_biometrics.py) uses [0x00] too. Plain offload — the
@@ -423,10 +445,13 @@ public final class BLEManager: NSObject, ObservableObject {
     private func exitBackfilling(reason: String) {
         guard backfilling else { return }
         backfilling = false
+        state.isOffloading = false
         backfillTimeout?.cancel()
         backfillTimeout = nil
         backfillFrameQueue.removeAll()
-        log("Backfill: session ended — reason=\(reason)")
+        log("Backfill: session ended — reason=\(reason) frames=\(offloadFramesThisSession)")
+        noteOffloadOutcome(reason: reason, framesSeen: offloadFramesThisSession)
+        offloadFramesThisSession = 0
         uploadOpportunistically()
         // Read-path sync runs AFTER the offload, never concurrently with it — the offload and the
         // pull share the WhoopStore actor, and a large first-run pull would starve the Backfiller's
@@ -439,6 +464,54 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         flushPendingArmIfNeeded()
         checkStrapLiveness()         // safety-net: strap ahead of us AND our frontier frozen ⇒ stuck?
+    }
+
+    /// Incomplete offload streak ⇒ pause auto-sync so the UI stops lying with "Descargando…" for hours.
+    /// Counts ALL timeouts (empty OR partial ~60-frame dribbles) — only HISTORY_COMPLETE clears the stall.
+    /// On stall: auto CLOCK-LOST repair (SET_CLOCK + reboot) when cooldown allows.
+    private func noteOffloadOutcome(reason: String, framesSeen: Int) {
+        if reason == "HISTORY_COMPLETE" {
+            state.consecutiveOffloadTimeouts = 0
+            if state.offloadStalled {
+                state.offloadStalled = false
+                log("Backfill: stall cleared — HISTORY_COMPLETE")
+            }
+            return
+        }
+        guard reason == "timeout" else { return }
+        state.consecutiveOffloadTimeouts += 1
+        log("Backfill: incomplete timeout \(state.consecutiveOffloadTimeouts)/\(BLEManager.offloadStallAfterTimeouts) frames=\(framesSeen)")
+        if state.consecutiveOffloadTimeouts >= BLEManager.offloadStallAfterTimeouts {
+            state.offloadStalled = true
+            state.strapNeedsReboot = true
+            log("Backfill: STALLED — pausing auto-sync")
+            if !scheduleAutoRepairIfNeeded(reason: "offload stall") {
+                log("Backfill: STALLED — auto-repair on cooldown; put strap on charger")
+            }
+        }
+    }
+
+    /// Kick SET_CLOCK + strap reboot when the RTC looks lost. Returns true if a repair was started.
+    @discardableResult
+    private func scheduleAutoRepairIfNeeded(reason: String) -> Bool {
+        if didAutoRepairThisConnection {
+            log("Auto-repair: skip (\(reason)) — already tried this connection")
+            return false
+        }
+        let now = Date().timeIntervalSince1970
+        if let last = UserDefaults.standard.object(forKey: BLEManager.autoRepairLastAtKey) as? Double,
+           now - last < BLEManager.autoRepairCooldownSeconds {
+            let left = Int(BLEManager.autoRepairCooldownSeconds - (now - last))
+            log("Auto-repair: skip (\(reason)) — cooldown \(left)s left")
+            return false
+        }
+        didAutoRepairThisConnection = true
+        UserDefaults.standard.set(now, forKey: BLEManager.autoRepairLastAtKey)
+        state.offloadStalled = true
+        state.strapNeedsReboot = true
+        log("Auto-repair: starting CLOCK-LOST recovery (\(reason))")
+        repairStrapClock(automatic: true)
+        return true
     }
 
     /// After an offload, judge liveness: stuck = strap reports records newer than our frontier AND our
@@ -465,6 +538,10 @@ public final class BLEManager: NSObject, ObservableObject {
                                               now: now)
             state.strapNeedsReboot = stuck
             if stuck {
+                if state.offloadStalled {
+                    log("Watchdog: behind + frontier frozen — already stalled; skip SET_CLOCK spam")
+                    return
+                }
                 log("Watchdog: behind + frontier frozen — recovery (exit high-freq + SET_CLOCK)")
                 send(.exitHighFreqSync, payload: [0x00])
                 send(.setClock, payload: BLEManager.setClockPayload())
@@ -543,6 +620,17 @@ public final class BLEManager: NSObject, ObservableObject {
     func requestSync(_ trigger: BackfillTrigger) {
         guard BLEManager.shouldRunPeriodicBackfill(
             connected: state.connected, bonded: state.bonded, backfilling: backfilling) else { return }
+        // Manual sync always gets one more try; auto triggers pause while stalled so we don't
+        // hammer SEND_HISTORICAL for hours with a dead RTC / silent history stream.
+        if state.offloadStalled, trigger != .manual {
+            log("Backfill: \(trigger) skipped (stalled — use Sync now or charger reboot)")
+            return
+        }
+        if trigger == .manual, state.offloadStalled {
+            state.offloadStalled = false
+            state.consecutiveOffloadTimeouts = 0
+            log("Backfill: manual sync clearing stall for one attempt")
+        }
         let now = Date().timeIntervalSince1970
         let last = UserDefaults.standard.object(forKey: BLEManager.backfillLastAtKey) as? Double
         guard BackfillPolicy.shouldRun(trigger: trigger, now: now, lastBackfillAt: last) else {
@@ -856,6 +944,17 @@ extension BLEManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         restoredPeripheral = nil
         state.connected = true
+        state.repairStatus = nil
+        // Only clear stall after an intentional repair reboot — NOT on every BLE flap. Clearing on
+        // every reconnect erased the 3-timeout counter and restarted the offload loop forever.
+        if pendingRepairReconnect {
+            pendingRepairReconnect = false
+            state.offloadStalled = false
+            state.consecutiveOffloadTimeouts = 0
+            log("Connect: post-repair reconnect — one offload attempt allowed")
+        }
+        // Allow one auto-repair per connection; cooldown still caps frequency across reconnects.
+        didAutoRepairThisConnection = false
         log("Connected — discovering services")
         peripheral.discoverServices([
             BLEManager.customService, BLEManager.heartRateService, BLEManager.batteryService,
@@ -876,6 +975,7 @@ extension BLEManager: CBCentralManagerDelegate {
         // Reset backfill state so the next connect starts a fresh offload.
         backfillStarted = false
         backfilling = false
+        state.isOffloading = false
         backfillTimeout?.cancel()
         backfillTimeout = nil
         backfillFrameQueue.removeAll()
@@ -1050,19 +1150,39 @@ extension BLEManager: CBPeripheralDelegate {
         }
     }
 
-    /// Manual CLOCK-LOST recovery (Device tab): SET_CLOCK, then reboot the strap 2s later to
-    /// latch it. Non-destructive — the strap's data store survives a reboot; the link drops and
+    /// CLOCK-LOST recovery: SET_CLOCK, then reboot the strap 2s later to latch it.
+    /// Non-destructive — the strap's data store survives a reboot; the link drops and
     /// re-establishes in seconds.
     ///
-    /// Sends BOTH observed SET_CLOCK payload forms. The 2026-05-24 recovery that revived this
-    /// strap's dead RTC (spec §0-bis) used the 9-byte `[unix u32 LE][5 pad]` form and the strap
-    /// acked it; the current 8-byte `[seconds][subseconds]` form gets NO response from a
-    /// clock-lost strap (seen live 2026-07-13). Whichever form this firmware accepts, latches.
-    public func repairStrapClock() {
-        log("Repair: manual CLOCK-LOST recovery — SET_CLOCK + reboot")
-        send(.setClock, payload: BLEManager.setClockPayload())
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.send(.rebootStrap, payload: [0x00])
+    /// Sends the verified 9-byte SET_CLOCK form. The 2026-05-24 recovery that revived this
+    /// strap's dead RTC used `[unix u32 LE][5 pad]`; the 8-byte form is silently ignored
+    /// on a clock-lost strap.
+    /// - Parameter automatic: true when kicked by stall / insane DATA_RANGE (UI copy differs).
+    public func repairStrapClock(automatic: Bool = false) {
+        let who = automatic ? "auto" : "manual"
+        log("Repair: \(who) CLOCK-LOST recovery — abort offload + SET_CLOCK + reboot")
+        pendingRepairReconnect = true
+        state.repairStatus = automatic
+            ? "Reparando reloj automáticamente — reiniciando pulsera…"
+            : "Reparando reloj — deteniendo descarga y reiniciando…"
+
+        cancelArmSequence()
+        if backfilling {
+            backfiller?.timeoutFired()
+            exitBackfilling(reason: "repair")
+        }
+        backfillFrameQueue.removeAll()
+        backfillDraining = false
+        state.offloadStalled = true   // block further SEND_HISTORICAL until reconnect
+        send(.toggleRealtimeHR, payload: [0x00])
+        send(.exitHighFreqSync, payload: [0x00])
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.send(.rebootStrap, payload: [0x00], writeType: .withResponse)
+            }
         }
     }
 
@@ -1131,15 +1251,30 @@ extension BLEManager: CBPeripheralDelegate {
                 router.handle(frame: frame)                       // UI (always)
                 if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,
                    let newest = BLEManager.dataRangeNewestUnix(from: frame) {
-                    strapNewestTs = newest                        // feeds the liveness watchdog
-                    // Diagnostic: log the full stored-history window the strap reports. The OLDEST
-                    // marker dates how far back the flash buffer reaches (e.g. a second-hand strap's
-                    // last-active period). Read-only — GET_DATA_RANGE never trims.
+                    let wall = Int(Date().timeIntervalSince1970)
+                    // Diagnostic: log the full stored-history window the strap reports.
                     let oldest = BLEManager.dataRangeOldestUnix(from: frame)
                     let fmt = ISO8601DateFormatter()
                     let oldestStr = oldest.map { fmt.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? "n/a"
                     let newestStr = fmt.string(from: Date(timeIntervalSince1970: TimeInterval(newest)))
                     log("DATA_RANGE strap window: oldest=\(oldestStr) newest=\(newestStr)")
+                    // Future markers (2029/2030) ⇒ CLOCK-LOST. Don't feed the watchdog a fake "ahead"
+                    // frontier; prefer auto-repair over a multi-minute timeout loop.
+                    if ClockPolicy.isFutureCorrupt(strapNewest: newest, wallNow: wall) {
+                        strapNewestTs = nil
+                        state.strapNeedsReboot = true
+                        log("Clock lost: DATA_RANGE newest in the future vs wall — auto-repair")
+                        if !scheduleAutoRepairIfNeeded(reason: "future DATA_RANGE") {
+                            state.offloadStalled = true
+                            log("Clock lost: auto-repair on cooldown — stalling offload")
+                        }
+                    } else if ClockPolicy.isSaneWallRelative(newest, wallNow: wall) {
+                        strapNewestTs = newest
+                    } else {
+                        // Absurdly old — ignore for watchdog, don't auto-reboot (may be idle strap).
+                        strapNewestTs = nil
+                        log("DATA_RANGE newest too old vs wall — ignoring for liveness")
+                    }
                 }
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
@@ -1167,6 +1302,7 @@ extension BLEManager: CBPeripheralDelegate {
                     // delays each chunk's insert→trim-ack — the strap then stalls waiting for the ack
                     // and the 20 s watchdog fires (the residual timeout). Drop the flood during offload.
                     if BLEManager.isOffloadFrame(frame) {
+                        offloadFramesThisSession += 1
                         armBackfillTimeout()
                         routeBackfillFrame(frame)
                     }

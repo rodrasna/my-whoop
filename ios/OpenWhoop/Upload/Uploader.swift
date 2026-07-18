@@ -57,10 +57,12 @@ final class Uploader {
         await drainEvents()
         await drainBattery()
         // Type-47 V24 biometric streams (raw ADC; cloud computes human units).
+        // Gravity before spo2/skin/resp: sleep detection on the server requires motion;
+        // deferring it behind large skin/resp backlogs left nights without sleep for hours.
+        await drainGravity()
         await drainSpo2()
         await drainSkinTemp()
         await drainResp()
-        await drainGravity()
     }
 
     /// Generic decoded drain: page `synced = 0` rows (oldest ts first), POST each page, and mark

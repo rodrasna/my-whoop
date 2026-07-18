@@ -189,8 +189,30 @@ private struct LiveContentView: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(WH.Color.textSecondary)
 
-                // Strap-reboot warning (conditional)
-                if state.strapNeedsReboot {
+                // Repair-in-progress banner
+                if let repair = state.repairStatus {
+                    HStack(spacing: WH.Spacing.xs) {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .tint(WH.Color.recoveryYellow)
+                        Text(repair)
+                            .font(WH.Font.caption)
+                            .foregroundStyle(WH.Color.recoveryYellow)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(WH.Spacing.sm)
+                    .background(WH.Color.recoveryYellow.opacity(0.10),
+                                in: RoundedRectangle(cornerRadius: WH.Radius.chip, style: .continuous))
+                }
+
+                // Strap-reboot / stalled-offload warning
+                if state.offloadStalled {
+                    StallRecoveryBanner(
+                        timeoutCount: state.consecutiveOffloadTimeouts,
+                        onRepair: { model.repairStrap() },
+                        onRetrySync: { model.syncNow() }
+                    )
+                } else if state.strapNeedsReboot {
                     HStack(spacing: WH.Spacing.xs) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 12, weight: .medium))
@@ -211,7 +233,33 @@ private struct LiveContentView: View {
     }
 
     private var syncFreshnessRow: some View {
-        let s = StalenessPolicy.state(lastSyncedAt: state.lastSyncedAt, now: Date().timeIntervalSince1970)
+        let now = Date().timeIntervalSince1970
+        if state.repairStatus != nil {
+            return syncStatusLine(state.repairStatus!, WH.Color.recoveryYellow)
+        }
+        if state.offloadStalled {
+            return syncStatusLine(
+                "Descarga atascada — reparando reloj o pon la pulsera al cargador",
+                WH.Color.recoveryRed
+            )
+        }
+        if state.isOffloading {
+            let n = state.consecutiveOffloadTimeouts
+            if n > 0 {
+                return syncStatusLine(
+                    "Reintentando descarga… (\(n) timeout\(n == 1 ? "" : "s") reciente\(n == 1 ? "" : "s"))",
+                    WH.Color.recoveryYellow
+                )
+            }
+            return syncStatusLine("Descargando historial de la pulsera…", WH.Color.recoveryYellow)
+        }
+        if state.pendingHrUpload > 500 {
+            let k = state.pendingHrUpload >= 1000
+                ? String(format: "%.1fk", Double(state.pendingHrUpload) / 1000)
+                : "\(state.pendingHrUpload)"
+            return syncStatusLine("Subiendo \(k) muestras al servidor — mantén la app abierta", WH.Color.recoveryYellow)
+        }
+        let s = StalenessPolicy.state(lastSyncedAt: state.lastSyncedAt, now: now)
         let (label, color): (String, Color) = {
             switch s {
             case .neverSynced: return ("Sin sincronizar nunca", WH.Color.textSecondary)
@@ -221,9 +269,13 @@ private struct LiveContentView: View {
             }
         }()
         let text = state.lastSyncedAt.map { ts in
-            "\(label) · hace \(Int((Date().timeIntervalSince1970 - ts) / 60))m"
+            "\(label) · hace \(Int((now - ts) / 60))m"
         } ?? label
-        return HStack(spacing: WH.Spacing.xs) {
+        return syncStatusLine(text, color)
+    }
+
+    private func syncStatusLine(_ text: String, _ color: Color) -> some View {
+        HStack(spacing: WH.Spacing.xs) {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)

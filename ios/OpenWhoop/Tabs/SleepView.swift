@@ -13,10 +13,11 @@ struct SleepView: View {
     @EnvironmentObject private var tabRouter: RootTabRouter
 
     // Local async state
-    @State private var detail: (session: CachedSleepSession, daily: DailyMetric?)?
+    @State private var detail: (session: CachedSleepSession?, daily: DailyMetric?)?
     @State private var weekNights: [CachedSleepSession] = []
     @State private var naps: [CachedSleepSession] = []
     @State private var showingAlarm = false
+    @State private var showingDevice = false
     @State private var stageBaselines = BaselineCalculator.StagePercents()
 
     // Alarm state read from UserDefaults for the summary card.
@@ -53,6 +54,14 @@ struct SleepView: View {
                 AlarmView()
                     .environmentObject(live)
             }
+            .sheet(isPresented: $showingDevice) {
+                NavigationStack {
+                    LiveView()
+                        .environmentObject(live)
+                        .environmentObject(metrics)
+                }
+                .presentationDragIndicator(.visible)
+            }
         }
         .preferredColorScheme(.dark)
         .task {
@@ -71,9 +80,15 @@ struct SleepView: View {
         }
     }
 
-    // MARK: - Selected day
-
     private var selectedDate: Date { tabRouter.selectedDate }
+
+    private var isViewingToday: Bool {
+        Calendar.current.isDateInToday(selectedDate)
+    }
+
+    private var selectedDayLabel: String {
+        TodayMetricHelpers.todayLabel(for: selectedDate, isViewingToday: isViewingToday)
+    }
 
     // MARK: - Data loading
 
@@ -89,22 +104,13 @@ struct SleepView: View {
         fmt.calendar = cal
         fmt.timeZone = cal.timeZone
         fmt.dateFormat = "yyyy-MM-dd"
-        let today = selectedDate
-        let from = cal.date(byAdding: .day, value: -30, to: today) ?? today
-        let rows = await metrics.daily(fromDay: fmt.string(from: from), toDay: fmt.string(from: today))
+        let from = cal.date(byAdding: .day, value: -30, to: selectedDate) ?? selectedDate
+        let rows = await metrics.daily(fromDay: fmt.string(from: from), toDay: fmt.string(from: selectedDate))
         stageBaselines = BaselineCalculator.stagePercents(from: rows)
     }
 
-    private var isViewingToday: Bool {
-        Calendar.current.isDateInToday(selectedDate)
-    }
-
-    private var selectedDayLabel: String {
-        TodayMetricHelpers.todayLabel(for: selectedDate, isViewingToday: isViewingToday)
-    }
-
     private var checkInEfficiencyPct: Double? {
-        if let e = detail?.session.efficiency, e > 0 { return e * 100 }
+        if let e = detail?.session?.efficiency, e > 0 { return e * 100 }
         if let e = detail?.daily?.efficiency, e > 0 { return e * 100 }
         return nil
     }
@@ -125,13 +131,19 @@ struct SleepView: View {
     // MARK: - Main scroll content
 
     private var scrollContent: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: WH.Spacing.lg) {
 
-                // Custom tight header (replaces the hidden system large-title nav bar)
-                ScreenHeader("Sueño")
-                DayNavigator(selectedDate: $tabRouter.selectedDate, showsCalendarPicker: true)
-                    .padding(.bottom, WH.Spacing.xs)
+                ScreenHeader("Sueño") {
+                    StrapStatusButton(state: live.state) { showingDevice = true }
+                }
+
+                DayNavigator(selectedDate: $tabRouter.selectedDate)
+
+                // 1. Headline — sleep quality ring + sub-metrics first
+                headlineSection
+
+                sleepQualityCard
 
                 SleepCheckInCard(
                     dayKey: MetricsRepository.localDayString(for: selectedDate),
@@ -144,14 +156,12 @@ struct SleepView: View {
 
                 SleepInsightsCard()
 
-                // 1. Headline — composite sleep score hero + total duration
-                headlineSection
-
-                sleepQualityCard
-
                 // 2. Hypnogram (noche principal)
                 if let session = detail?.session {
                     HypnogramView(session: session)
+                } else if detail?.daily != nil {
+                    noDataCard(icon: "moon.zzz",
+                               message: "Sin hipnograma · horas y fases agregadas abajo · \(selectedDayLabel)")
                 } else {
                     noDataCard(icon: "moon.zzz", message: "Sin etapas de sueño · \(selectedDayLabel)")
                 }
@@ -207,7 +217,10 @@ struct SleepView: View {
         let session = detail?.session
         let daily = detail?.daily
 
-        let scorePct = TodayMetricHelpers.sleepScorePercent(daily: daily, sleep: session)
+        let scorePct = TodayMetricHelpers.sleepScorePercent(
+            daily: daily, sleep: session,
+            wakeDayKey: MetricsRepository.localDayString(for: selectedDate)
+        )
 
         return VStack(spacing: WH.Spacing.sm) {
             if let score = scorePct {
@@ -234,11 +247,7 @@ struct SleepView: View {
                         .padding(.horizontal, WH.Spacing.sm)
                 }
             } else {
-                Text("Sin datos de sueño · \(selectedDayLabel)")
-                    .font(WH.Font.caption)
-                    .foregroundStyle(WH.Color.textSecondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, WH.Spacing.xl)
+                emptySleepQualityRing
             }
 
             if let session = session {
@@ -255,6 +264,36 @@ struct SleepView: View {
                     .monospacedDigit()
             }
         }
+    }
+
+    private var emptySleepQualityRing: some View {
+        let size: CGFloat = 200
+        let stroke = WH.Ring.heroStroke(diameter: size)
+        return VStack(spacing: WH.Spacing.md) {
+            ZStack {
+                ProgressRing(progress: 0,
+                             color: WH.Color.sleepBlue,
+                             diameter: size,
+                             strokeWidth: stroke)
+                Text("—")
+                    .font(WH.Font.ringValue(size: size * 0.30, weight: .black))
+                    .foregroundStyle(WH.Color.textSecondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, WH.Spacing.sm)
+
+            Text("CALIDAD DEL SUEÑO")
+                .font(WH.Font.ringLabel())
+                .foregroundStyle(WH.Color.textSecondary)
+                .tracking(0.8)
+
+            Text("Sin datos de sueño · \(selectedDayLabel)")
+                .font(WH.Font.caption)
+                .foregroundStyle(WH.Color.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, WH.Spacing.sm)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func alignmentCaption(_ alignment: String?) -> String {
@@ -459,21 +498,32 @@ struct SleepView: View {
     private var inSleepSignalsSection: some View {
         let session = detail?.session
         let daily = detail?.daily
+        let restingHr = TodayMetricHelpers.restingHr(sleep: session, daily: daily)
+        let hrvMs = TodayMetricHelpers.hrvMs(sleep: session, daily: daily)
+        let respRate = daily?.respRateBpm
+        let spo2 = daily?.spo2Pct
+        let skinTempDev = daily?.skinTempDevC
+        let canChart = session != nil
 
         return VStack(alignment: .leading, spacing: WH.Spacing.sm) {
             sectionHeader("Señales durante el sueño")
 
+            if session == nil, daily != nil {
+                Text("Medias nocturnas del servidor · sin hipnograma detallado en el móvil.")
+                    .font(WH.Font.caption)
+                    .foregroundStyle(WH.Color.textSecondary)
+            }
+
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
                       spacing: WH.Spacing.sm) {
 
-                // FC: única señal con serie temporal real → pulsable para ver la evolución.
-                if let session {
+                if canChart, let session {
                     NavigationLink(destination: SleepHRChartView(session: session)) {
                         MetricCard(
                             title: "FC en reposo",
-                            value: session.restingHr.map { "\($0)" } ?? "—",
-                            unit: session.restingHr != nil ? "lpm" : nil,
-                            accentColor: session.restingHr != nil ? WH.Color.textPrimary : WH.Color.textSecondary
+                            value: restingHr.map { "\($0)" } ?? "—",
+                            unit: restingHr != nil ? "lpm" : nil,
+                            accentColor: restingHr != nil ? WH.Color.textPrimary : WH.Color.textSecondary
                         ) {
                             chartHint
                         }
@@ -482,27 +532,26 @@ struct SleepView: View {
                 } else {
                     MetricCard(
                         title: "FC en reposo",
-                        value: "—",
-                        unit: nil,
-                        accentColor: WH.Color.textSecondary
+                        value: restingHr.map { "\($0)" } ?? "—",
+                        unit: restingHr != nil ? "lpm" : nil,
+                        accentColor: restingHr != nil ? WH.Color.textPrimary : WH.Color.textSecondary
                     )
                 }
 
                 MetricCard(
                     title: "VFC",
-                    value: session?.avgHrv.map { String(format: "%.0f", $0) } ?? "—",
-                    unit: session?.avgHrv != nil ? "ms" : nil,
-                    accentColor: session?.avgHrv != nil ? WH.Color.recoveryGreen : WH.Color.textSecondary
+                    value: hrvMs.map { String(format: "%.0f", $0) } ?? "—",
+                    unit: hrvMs != nil ? "ms" : nil,
+                    accentColor: hrvMs != nil ? WH.Color.recoveryGreen : WH.Color.textSecondary
                 )
 
-                // Respiración: tendencia por instante (RSA del IBI) → pulsable.
-                if let session {
+                if canChart, let session {
                     NavigationLink(destination: SleepRespChartView(session: session)) {
                         MetricCard(
                             title: "Frec. respiratoria",
-                            value: daily?.respRateBpm.map { String(format: "%.1f", $0) } ?? "—",
-                            unit: daily?.respRateBpm != nil ? "/min" : nil,
-                            accentColor: daily?.respRateBpm != nil ? WH.Color.strainBlue : WH.Color.textSecondary
+                            value: respRate.map { String(format: "%.1f", $0) } ?? "—",
+                            unit: respRate != nil ? "/min" : nil,
+                            accentColor: respRate != nil ? WH.Color.strainBlue : WH.Color.textSecondary
                         ) {
                             chartHint
                         }
@@ -511,20 +560,19 @@ struct SleepView: View {
                 } else {
                     MetricCard(
                         title: "Frec. respiratoria",
-                        value: "—",
-                        unit: nil,
-                        accentColor: WH.Color.textSecondary
+                        value: respRate.map { String(format: "%.1f", $0) } ?? "—",
+                        unit: respRate != nil ? "/min" : nil,
+                        accentColor: respRate != nil ? WH.Color.strainBlue : WH.Color.textSecondary
                     )
                 }
 
-                // SpO₂: tendencia por instante (ratio-of-ratios, con gate de calidad) → pulsable.
-                if let session {
+                if canChart, let session {
                     NavigationLink(destination: SleepSpo2ChartView(session: session)) {
                         MetricCard(
                             title: "SpO₂ estimada",
-                            value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
-                            unit: daily?.spo2Pct != nil ? "%" : nil,
-                            accentColor: daily?.spo2Pct != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
+                            value: spo2.map { String(format: "%.1f", $0) } ?? "—",
+                            unit: spo2 != nil ? "%" : nil,
+                            accentColor: spo2 != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
                         ) {
                             chartHint
                         }
@@ -533,23 +581,22 @@ struct SleepView: View {
                 } else {
                     MetricCard(
                         title: "SpO₂ estimada",
-                        value: daily?.spo2Pct.map { String(format: "%.1f", $0) } ?? "—",
-                        unit: daily?.spo2Pct != nil ? "%" : nil,
-                        accentColor: daily?.spo2Pct != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
+                        value: spo2.map { String(format: "%.1f", $0) } ?? "—",
+                        unit: spo2 != nil ? "%" : nil,
+                        accentColor: spo2 != nil ? WH.Color.sleepBlue : WH.Color.textSecondary
                     )
                 }
 
-                // Temperatura de piel: desviación respecto a mediana de la noche → pulsable.
-                if let session {
+                if canChart, let session {
                     NavigationLink(destination: SleepTempChartView(session: session)) {
                         MetricCard(
                             title: "Desv. temp. piel",
                             value: {
-                                guard let t = daily?.skinTempDevC else { return "—" }
+                                guard let t = skinTempDev else { return "—" }
                                 return String(format: "%+.1f", t)
                             }(),
-                            unit: daily?.skinTempDevC != nil ? "Δ°C" : nil,
-                            accentColor: daily?.skinTempDevC != nil ? WH.Color.recoveryYellow : WH.Color.textSecondary
+                            unit: skinTempDev != nil ? "Δ°C" : nil,
+                            accentColor: skinTempDev != nil ? WH.Color.recoveryYellow : WH.Color.textSecondary
                         ) {
                             chartHint
                         }
@@ -558,9 +605,12 @@ struct SleepView: View {
                 } else {
                     MetricCard(
                         title: "Desv. temp. piel",
-                        value: "—",
-                        unit: nil,
-                        accentColor: WH.Color.textSecondary
+                        value: {
+                            guard let t = skinTempDev else { return "—" }
+                            return String(format: "%+.1f", t)
+                        }(),
+                        unit: skinTempDev != nil ? "Δ°C" : nil,
+                        accentColor: skinTempDev != nil ? WH.Color.recoveryYellow : WH.Color.textSecondary
                     )
                 }
             }
