@@ -64,9 +64,16 @@ public final class BLEManager: NSObject, ObservableObject {
     private var didAutoRepairThisConnection = false
     /// Set when repairStrapClock reboots the strap; the next connect may clear stall for one attempt.
     private var pendingRepairReconnect = false
+    /// After CLOCK-LOST detect: run one remapped salvage offload, then repair.
+    private var pendingRepairAfterSalvage = false
+    private var didSalvageThisClockLoss = false
+    /// True while DATA_RANGE (or an open episode) shows an unusable/future strap RTC.
+    /// Survives HISTORY_COMPLETE so we don't clear stall and restart the offload loop.
+    private var rtcKnownCorrupt = false
     /// UserDefaults key: CLOCK-LOST hold survives app kill so we don't re-arm the
     /// SEND_HISTORICAL timeout storm every launch while DATA_RANGE is still insane.
     static let rtcHoldKey = "rtcClockHoldActive"
+    private var salvageDeadline: DispatchWorkItem?
 
     /// Max time to wait for salvage offload before forcing SET_CLOCK + reboot.
     static let clockLossSalvageTimeoutSeconds = 90
