@@ -39,6 +39,6 @@ enum OffloadStallPolicy {
 
     static let clockHoldBannerBody =
         "La pulsera no está grabando con un reloj válido. "
-        + "Repara el reloj o déjala en el cargador 3–5 minutos; "
-        + "reintentar la descarga no recupera el deporte de hoy."
+        + "Déjala EN el cargador 10+ minutos, con la app abierta, y pulsa Reparar "
+        + "sin quitarla. Un soft reboot corto casi nunca engancha el RTC."
 }

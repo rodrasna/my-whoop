@@ -613,6 +613,8 @@ public final class BLEManager: NSObject, ObservableObject {
         Task { @MainActor in
             try? await whoopStore?.markClockLossRecovered(deviceId: deviceId, recoveredAt: wall)
         }
+        // Alarm may have been deferred during the hold — try now that RTC looks sane.
+        flushPendingArmIfNeeded()
     }
 
     /// Incomplete offload streak ⇒ pause auto-sync so the UI stops lying with "Descargando…" for hours.
@@ -864,6 +866,15 @@ public final class BLEManager: NSObject, ObservableObject {
             log("Alarm: arm skipped — strap not ready (connected=\(state.connected) handshake=\(connectHandshakeDone))")
             return false
         }
+        // Alarm arming blasts SET_CLOCK/SET_ALARM and times out under CLOCK-LOST, crowding out
+        // the real repair path. Hold the pending target; restore after DATA_RANGE is sane.
+        if rtcKnownCorrupt || state.clockLossStatus != nil {
+            log("Alarm: arm deferred — RTC corrupt / clock hold active")
+            let epochSec = UInt32(date.timeIntervalSince1970)
+            pendingArm = PendingArm(targetEpoch: epochSec, fireDate: date, attempt: 0)
+            state.firmwareAlarmVerified = false
+            return false
+        }
         guard date.timeIntervalSinceNow > 5 else {
             log("Alarm: arm skipped — fire time too soon")
             return false
@@ -918,11 +929,19 @@ public final class BLEManager: NSObject, ObservableObject {
 
     private func flushPendingArmIfNeeded() {
         guard pendingArm != nil, !backfilling, armPhase == .idle else { return }
+        if rtcKnownCorrupt || state.clockLossStatus != nil {
+            log("Alarm: flush deferred — RTC corrupt / clock hold active")
+            return
+        }
         startArmSequence()
     }
 
     private func startArmSequence() {
         guard var pending = pendingArm else { return }
+        if rtcKnownCorrupt || state.clockLossStatus != nil {
+            log("Alarm: arm sequence blocked — RTC corrupt / clock hold active")
+            return
+        }
         cancelArmStepTimer()
         pending.attempt += 1
         pendingArm = pending
@@ -1294,7 +1313,17 @@ extension BLEManager: CBPeripheralDelegate {
         // throttled by BackfillPolicy). Deferred ~1.5s so SET_CLOCK/GET_DATA_RANGE round-trip first and
         // SEND_HISTORICAL runs on a settled link, like the paced Mac prototype. beginBackfill is itself
         // gated on connectHandshakeDone so a racing foreground/restore trigger can't fire it early.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
+        // Under CLOCK-LOST, skip auto offload — vacuous HISTORY_COMPLETE just burns airtime while the
+        // alarm path was also fighting SET_CLOCK. Wait for a sane DATA_RANGE (or manual Sync).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            if self.rtcKnownCorrupt || self.state.clockLossStatus != nil {
+                self.log("Backfill: connect skipped — RTC still corrupt (await sane DATA_RANGE)")
+                self.enterClockHold(reason: "post-connect RTC still corrupt")
+                return
+            }
+            self.requestSync(.connect)
+        }
         Task { await self.recoverStrandedUploadsIfNeeded() }
         uploadOpportunistically()
         // NOTE: the server pull + cloud-restore are deliberately NOT kicked here. They share the
@@ -1318,23 +1347,27 @@ extension BLEManager: CBPeripheralDelegate {
         }
     }
 
-    /// CLOCK-LOST recovery: SET_CLOCK, then reboot the strap 2s later to latch it.
+    /// CLOCK-LOST recovery: pulse SET_CLOCK several times, then reboot to latch.
     /// Non-destructive — the strap's data store survives a reboot; the link drops and
     /// re-establishes in seconds.
     ///
     /// Sends the verified 9-byte SET_CLOCK form. The 2026-05-24 recovery that revived this
     /// strap's dead RTC used `[unix u32 LE][5 pad]`; the 8-byte form is silently ignored
-    /// on a clock-lost strap.
+    /// on a clock-lost strap. A single SET_CLOCK+2s-reboot often fails to latch on a deep
+    /// CLOCK-LOST — pulse 3× with settle, then reboot. Best odds: strap ON the charger.
     /// - Parameter automatic: true when kicked by stall / insane DATA_RANGE (UI copy differs).
     public func repairStrapClock(automatic: Bool = false) {
         let who = automatic ? "auto" : "manual"
-        log("Repair: \(who) CLOCK-LOST recovery — abort offload + SET_CLOCK + reboot")
+        log("Repair: \(who) CLOCK-LOST recovery — abort offload + SET_CLOCK×3 + reboot")
         pendingRepairReconnect = true
         state.repairStatus = automatic
-            ? "Reparando reloj automáticamente — reiniciando pulsera…"
-            : "Reparando reloj — deteniendo descarga y reiniciando…"
+            ? "Reparando reloj — déjala en el cargador…"
+            : "Reparando reloj — SET_CLOCK×3 + reboot (mejor en cargador)…"
+        state.clockLossStatus = "RTC perdido — reparando (déjala en el cargador)…"
 
         cancelArmSequence()
+        // Don't resume a failing alarm-arm storm across the reboot.
+        pendingArm = nil
         if backfilling {
             backfiller?.timeoutFired()
             exitBackfilling(reason: "repair")
@@ -1345,12 +1378,24 @@ extension BLEManager: CBPeripheralDelegate {
         send(.toggleRealtimeHR, payload: [0x00])
         send(.exitHighFreqSync, payload: [0x00])
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            self.send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.send(.rebootStrap, payload: [0x00], writeType: .withResponse)
-            }
+        // Pulse wall time onto the strap several times before reboot — one shot was not latching.
+        let pulseCount = 3
+        let pulseSpacing: TimeInterval = 2.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.pulseSetClockThenReboot(remaining: pulseCount, spacing: pulseSpacing)
+        }
+    }
+
+    private func pulseSetClockThenReboot(remaining: Int, spacing: TimeInterval) {
+        guard remaining > 0 else {
+            log("Repair: pulsing done — REBOOT_STRAP")
+            send(.rebootStrap, payload: [0x00], writeType: .withResponse)
+            return
+        }
+        log("Repair: SET_CLOCK pulse (\(4 - remaining)/3)")
+        send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
+        DispatchQueue.main.asyncAfter(deadline: .now() + spacing) { [weak self] in
+            self?.pulseSetClockThenReboot(remaining: remaining - 1, spacing: spacing)
         }
     }
 
