@@ -21,4 +21,13 @@ final class OffloadStallPolicyTests: XCTestCase {
         XCTAssertTrue(OffloadStallPolicy.shouldStartSalvage(alreadySalvagedThisEpisode: false))
         XCTAssertFalse(OffloadStallPolicy.shouldStartSalvage(alreadySalvagedThisEpisode: true))
     }
+
+    func testAwaitProbeOnlyWhileHoldActive() {
+        XCTAssertTrue(OffloadStallPolicy.shouldAwaitDataRangeProbe(holdActive: true))
+        XCTAssertFalse(OffloadStallPolicy.shouldAwaitDataRangeProbe(holdActive: false))
+    }
+
+    func testProbeTimeoutIsPositive() {
+        XCTAssertGreaterThan(OffloadStallPolicy.rtcProbeTimeoutSeconds, 1.5)
+    }
 }

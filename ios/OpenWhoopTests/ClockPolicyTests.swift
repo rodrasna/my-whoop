@@ -45,4 +45,11 @@ final class ClockPolicyTests: XCTestCase {
         XCTAssertTrue(ClockPolicy.isClockLost(strapNewest: nil, wallNow: 1_784_160_000))
         XCTAssertFalse(ClockPolicy.isFutureCorrupt(strapNewest: nil, wallNow: 1_784_160_000))
     }
+
+    func testLatchedWallClockNearWall() {
+        let wall = 1_784_160_000
+        XCTAssertTrue(ClockPolicy.isLatchedWallClock(deviceClock: wall - 30, wallNow: wall))
+        XCTAssertFalse(ClockPolicy.isLatchedWallClock(deviceClock: 31_500_000, wallNow: wall))
+        XCTAssertFalse(ClockPolicy.isLatchedWallClock(deviceClock: wall + 200_000, wallNow: wall))
+    }
 }
