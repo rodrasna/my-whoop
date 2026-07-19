@@ -30,4 +30,10 @@ final class OffloadStallPolicyTests: XCTestCase {
     func testProbeTimeoutIsPositive() {
         XCTAssertGreaterThan(OffloadStallPolicy.rtcProbeTimeoutSeconds, 1.5)
     }
+
+    func testExtendProbeOnEmptyDataRange() {
+        XCTAssertTrue(OffloadStallPolicy.shouldExtendProbeOnEmptyDataRange(extensionsUsed: 0))
+        XCTAssertTrue(OffloadStallPolicy.shouldExtendProbeOnEmptyDataRange(extensionsUsed: 1))
+        XCTAssertFalse(OffloadStallPolicy.shouldExtendProbeOnEmptyDataRange(extensionsUsed: 2))
+    }
 }

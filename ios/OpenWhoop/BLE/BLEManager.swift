@@ -78,6 +78,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// before re-asserting hold (official WHOOP may have fixed RTC while we still held).
     private var rtcProbeDeadline: DispatchWorkItem?
     private var rtcAwaitingDataRangeProbe = false
+    private var rtcProbeExtensionsUsed = 0
 
     /// Max time to wait for salvage offload before forcing SET_CLOCK + reboot.
     static let clockLossSalvageTimeoutSeconds = 90
@@ -502,6 +503,17 @@ public final class BLEManager: NSObject, ObservableObject {
         state.clockLossStatus = "RTC perdido — intentando recuperar histórico…"
         log("Clock lost: \(reason) newest=\(newest) wall=\(wall) Δ≈\(newest - wall)s")
 
+        // If salvage already ran this episode, hold immediately (don't wait on DB Task —
+        // otherwise the RTC probe timeout races and double-logs hold).
+        if !OffloadStallPolicy.shouldStartSalvage(alreadySalvagedThisEpisode: didSalvageThisClockLoss) {
+            log("Clock lost: salvage already tried — holding (\(reason))")
+            enterClockHold(reason: reason)
+            if !scheduleAutoRepairIfNeeded(reason: reason) {
+                log("Clock lost: auto-repair on cooldown — charger hold")
+            }
+            return
+        }
+
         Task { @MainActor in
             let frontier = try? await whoopStore?.cursor("hist_hr_frontier")
             let open = try? await whoopStore?.openClockLossEvent(deviceId: deviceId)
@@ -544,25 +556,44 @@ public final class BLEManager: NSObject, ObservableObject {
     private func beginRtcReprobe(reason: String) {
         cancelRtcProbe()
         rtcAwaitingDataRangeProbe = true
+        rtcProbeExtensionsUsed = 0
         // Keep didSalvageThisClockLoss so a still-corrupt DATA_RANGE won't restart salvage.
         state.offloadStalled = true
         state.clockLossStatus = OffloadStallPolicy.rtcProbeStatus
         log("Clock probe: \(reason) — awaiting DATA_RANGE / latched GET_CLOCK")
+        scheduleRtcProbeDeadline(after: OffloadStallPolicy.rtcProbeTimeoutSeconds)
+    }
+
+    private func scheduleRtcProbeDeadline(after seconds: TimeInterval) {
+        rtcProbeDeadline?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.rtcAwaitingDataRangeProbe else { return }
             self.rtcAwaitingDataRangeProbe = false
             self.enterClockHold(reason: "DATA_RANGE probe timeout")
         }
         rtcProbeDeadline = item
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + OffloadStallPolicy.rtcProbeTimeoutSeconds,
-            execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    /// Empty flash markers after reboot: pulse SET_CLOCK and wait longer for GET_CLOCK to latch.
+    private func extendRtcProbeAfterEmptyDataRange() {
+        guard rtcAwaitingDataRangeProbe else { return }
+        guard OffloadStallPolicy.shouldExtendProbeOnEmptyDataRange(
+            extensionsUsed: rtcProbeExtensionsUsed) else { return }
+        rtcProbeExtensionsUsed += 1
+        log("Clock probe: empty DATA_RANGE — SET_CLOCK + extend #\(rtcProbeExtensionsUsed)")
+        state.clockLossStatus = OffloadStallPolicy.rtcProbeStatus
+        send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
+        send(.getClock, payload: [])
+        send(.getDataRange)
+        scheduleRtcProbeDeadline(after: OffloadStallPolicy.rtcProbeExtendSeconds)
     }
 
     private func cancelRtcProbe() {
         rtcProbeDeadline?.cancel()
         rtcProbeDeadline = nil
         rtcAwaitingDataRangeProbe = false
+        rtcProbeExtensionsUsed = 0
     }
 
     private var isRtcHoldActive: Bool {
@@ -1587,7 +1618,16 @@ extension BLEManager: CBPeripheralDelegate {
                         // Empty DATA_RANGE after official sync trim + latched RTC → resume live logging.
                         log("DATA_RANGE empty markers — recovering via latched GET_CLOCK")
                         markClockLossRecoveredIfNeeded(wall: wall)
+                    } else if rtcAwaitingDataRangeProbe {
+                        extendRtcProbeAfterEmptyDataRange()
                     }
+                }
+                // Always log GET_CLOCK replies while probing/holding — silence here is the
+                // classic deep CLOCK-LOST symptom (no ack / unusable clock field).
+                if frame.count > 6, frame[6] == WhoopCommand.getClock.rawValue {
+                    let parsed = parseFrame(frame)
+                    let clockVal = parsed.parsed["clock"]?.intValue
+                    log("GET_CLOCK resp ok=\(parsed.ok) clock=\(clockVal.map(String.init) ?? "nil") len=\(frame.count)")
                 }
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
