@@ -37,4 +37,12 @@ enum ClockPolicy {
         guard let newest = strapNewest else { return true }
         return !isSaneWallRelative(newest, wallNow: wallNow)
     }
+
+    /// True when GET_CLOCK returned an absolute wall-like RTC (official WHOOP / latched SET_CLOCK).
+    /// Relative device epochs (~3e7) fail this — those are healthy for realtime decode but are not
+    /// a CLOCK-LOST recovery signal by themselves.
+    static func isLatchedWallClock(deviceClock: Int, wallNow: Int,
+                                   maxDrift: Int = maxFutureSkewSeconds) -> Bool {
+        abs(wallNow - deviceClock) <= maxDrift
+    }
 }

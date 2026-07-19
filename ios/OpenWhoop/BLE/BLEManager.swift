@@ -74,6 +74,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// SEND_HISTORICAL timeout storm every launch while DATA_RANGE is still insane.
     static let rtcHoldKey = "rtcClockHoldActive"
     private var salvageDeadline: DispatchWorkItem?
+    /// After Reparar / persisted hold: wait for a fresh DATA_RANGE or latched GET_CLOCK
+    /// before re-asserting hold (official WHOOP may have fixed RTC while we still held).
+    private var rtcProbeDeadline: DispatchWorkItem?
+    private var rtcAwaitingDataRangeProbe = false
+    private var rtcProbeExtensionsUsed = 0
 
     /// Max time to wait for salvage offload before forcing SET_CLOCK + reboot.
     static let clockLossSalvageTimeoutSeconds = 90
@@ -498,6 +503,17 @@ public final class BLEManager: NSObject, ObservableObject {
         state.clockLossStatus = "RTC perdido — intentando recuperar histórico…"
         log("Clock lost: \(reason) newest=\(newest) wall=\(wall) Δ≈\(newest - wall)s")
 
+        // If salvage already ran this episode, hold immediately (don't wait on DB Task —
+        // otherwise the RTC probe timeout races and double-logs hold).
+        if !OffloadStallPolicy.shouldStartSalvage(alreadySalvagedThisEpisode: didSalvageThisClockLoss) {
+            log("Clock lost: salvage already tried — holding (\(reason))")
+            enterClockHold(reason: reason)
+            if !scheduleAutoRepairIfNeeded(reason: reason) {
+                log("Clock lost: auto-repair on cooldown — charger hold")
+            }
+            return
+        }
+
         Task { @MainActor in
             let frontier = try? await whoopStore?.cursor("hist_hr_frontier")
             let open = try? await whoopStore?.openClockLossEvent(deviceId: deviceId)
@@ -525,6 +541,7 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// Pause auto offloads and show the charger hold — used when RTC won't latch after salvage/repair.
     private func enterClockHold(reason: String) {
+        cancelRtcProbe()
         rtcKnownCorrupt = true
         didSalvageThisClockLoss = true
         state.offloadStalled = true
@@ -532,6 +549,57 @@ public final class BLEManager: NSObject, ObservableObject {
         state.clockLossStatus = OffloadStallPolicy.clockHoldStatus
         UserDefaults.standard.set(true, forKey: BLEManager.rtcHoldKey)
         log("Clock hold: \(reason) — auto offload paused until DATA_RANGE sane (persisted)")
+    }
+
+    /// Soft-clear enough state to accept a fresh DATA_RANGE / latched GET_CLOCK without
+    /// starting another salvage storm. Keeps auto-offload blocked until the probe succeeds.
+    private func beginRtcReprobe(reason: String) {
+        cancelRtcProbe()
+        rtcAwaitingDataRangeProbe = true
+        rtcProbeExtensionsUsed = 0
+        // Keep didSalvageThisClockLoss so a still-corrupt DATA_RANGE won't restart salvage.
+        state.offloadStalled = true
+        state.clockLossStatus = OffloadStallPolicy.rtcProbeStatus
+        log("Clock probe: \(reason) — awaiting DATA_RANGE / latched GET_CLOCK")
+        scheduleRtcProbeDeadline(after: OffloadStallPolicy.rtcProbeTimeoutSeconds)
+    }
+
+    private func scheduleRtcProbeDeadline(after seconds: TimeInterval) {
+        rtcProbeDeadline?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.rtcAwaitingDataRangeProbe else { return }
+            self.rtcAwaitingDataRangeProbe = false
+            self.enterClockHold(reason: "DATA_RANGE probe timeout")
+        }
+        rtcProbeDeadline = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    /// Empty flash markers after reboot: pulse SET_CLOCK and wait longer for GET_CLOCK to latch.
+    private func extendRtcProbeAfterEmptyDataRange() {
+        guard rtcAwaitingDataRangeProbe else { return }
+        guard OffloadStallPolicy.shouldExtendProbeOnEmptyDataRange(
+            extensionsUsed: rtcProbeExtensionsUsed) else { return }
+        rtcProbeExtensionsUsed += 1
+        log("Clock probe: empty DATA_RANGE — SET_CLOCK + extend #\(rtcProbeExtensionsUsed)")
+        state.clockLossStatus = OffloadStallPolicy.rtcProbeStatus
+        send(.setClock, payload: BLEManager.setClockPayload(), writeType: .withResponse)
+        send(.getClock, payload: [])
+        send(.getDataRange)
+        scheduleRtcProbeDeadline(after: OffloadStallPolicy.rtcProbeExtendSeconds)
+    }
+
+    private func cancelRtcProbe() {
+        rtcProbeDeadline?.cancel()
+        rtcProbeDeadline = nil
+        rtcAwaitingDataRangeProbe = false
+        rtcProbeExtensionsUsed = 0
+    }
+
+    private var isRtcHoldActive: Bool {
+        rtcKnownCorrupt
+            || state.clockLossStatus != nil
+            || UserDefaults.standard.bool(forKey: BLEManager.rtcHoldKey)
     }
 
     /// Re-apply CLOCK-LOST hold after process death / relaunch.
@@ -612,9 +680,14 @@ public final class BLEManager: NSObject, ObservableObject {
         let inClockEpisode = rtcKnownCorrupt
             || state.clockLossStatus != nil
             || state.lastClockLossDetectedAt != nil
+            || UserDefaults.standard.bool(forKey: BLEManager.rtcHoldKey)
+            || rtcAwaitingDataRangeProbe
         guard inClockEpisode else { return }
 
         let heldForClock = state.clockLossStatus != nil
+            || UserDefaults.standard.bool(forKey: BLEManager.rtcHoldKey)
+            || rtcAwaitingDataRangeProbe
+        cancelRtcProbe()
         rtcKnownCorrupt = false
         backfiller?.clockLossAnchor = nil
         didSalvageThisClockLoss = false
@@ -635,6 +708,10 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         // Alarm may have been deferred during the hold — try now that RTC looks sane.
         flushPendingArmIfNeeded()
+        // Kick one offload now that the hold is lifted (connect probe may have skipped it).
+        if connectHandshakeDone, !backfilling {
+            requestSync(.connect)
+        }
     }
 
     /// Incomplete offload streak ⇒ pause auto-sync so the UI stops lying with "Descargando…" for hours.
@@ -1170,17 +1247,11 @@ extension BLEManager: CBCentralManagerDelegate {
         // every reconnect erased the 3-timeout counter and restarted the offload loop forever.
         if pendingRepairReconnect {
             pendingRepairReconnect = false
-            // Do NOT clear stall under an active/persisted CLOCK-LOST hold — that single
-            // "allowed" offload was the retry storm the user was seeing.
-            if rtcKnownCorrupt || state.clockLossStatus != nil
-                || UserDefaults.standard.bool(forKey: BLEManager.rtcHoldKey) {
-                state.offloadStalled = true
-                log("Connect: post-repair reconnect — keeping RTC hold (no auto offload)")
-            } else {
-                state.offloadStalled = false
-                state.consecutiveOffloadTimeouts = 0
-                log("Connect: post-repair reconnect — one offload attempt allowed")
-            }
+            // Keep auto-offload blocked, but start a fresh RTC probe — official WHOOP or
+            // our SET_CLOCK×3 may have latched; blind "keeping hold" skipped DATA_RANGE.
+            state.offloadStalled = true
+            beginRtcReprobe(reason: "post-repair reconnect")
+            log("Connect: post-repair reconnect — probing DATA_RANGE before lifting hold")
         }
         // Allow one auto-repair per connection; cooldown still caps frequency across reconnects.
         didAutoRepairThisConnection = false
@@ -1201,6 +1272,7 @@ extension BLEManager: CBCentralManagerDelegate {
         collector?.clockRef = nil
         backfiller?.clockRef = nil
         connectHandshakeDone = false
+        cancelRtcProbe()
         // Reset backfill state so the next connect starts a fresh offload.
         backfillStarted = false
         backfilling = false
@@ -1355,13 +1427,19 @@ extension BLEManager: CBPeripheralDelegate {
         // throttled by BackfillPolicy). Deferred ~1.5s so SET_CLOCK/GET_DATA_RANGE round-trip first and
         // SEND_HISTORICAL runs on a settled link, like the paced Mac prototype. beginBackfill is itself
         // gated on connectHandshakeDone so a racing foreground/restore trigger can't fire it early.
-        // Under CLOCK-LOST, skip auto offload — vacuous HISTORY_COMPLETE just burns airtime while the
-        // alarm path was also fighting SET_CLOCK. Wait for a sane DATA_RANGE (or manual Sync).
+        // Under CLOCK-LOST, skip auto offload and await a fresh DATA_RANGE / latched GET_CLOCK
+        // instead of re-entering hold from stale persisted state (official app may have fixed RTC).
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self else { return }
-            if self.rtcKnownCorrupt || self.state.clockLossStatus != nil {
-                self.log("Backfill: connect skipped — RTC still corrupt (await sane DATA_RANGE)")
-                self.enterClockHold(reason: "post-connect RTC still corrupt")
+            let hold = self.isRtcHoldActive || self.rtcAwaitingDataRangeProbe
+            if OffloadStallPolicy.shouldAwaitDataRangeProbe(holdActive: hold) {
+                self.log("Backfill: connect deferred — RTC probe in flight")
+                if !self.rtcAwaitingDataRangeProbe {
+                    self.beginRtcReprobe(reason: "post-connect hold active")
+                }
+                // Re-ask DATA_RANGE in case the handshake reply was lost (common after official BLE).
+                self.send(.getDataRange)
+                self.send(.getClock, payload: [])
                 return
             }
             self.requestSync(.connect)
@@ -1402,6 +1480,8 @@ extension BLEManager: CBPeripheralDelegate {
         let who = automatic ? "auto" : "manual"
         log("Repair: \(who) CLOCK-LOST recovery — abort offload + SET_CLOCK×3 + reboot")
         pendingRepairReconnect = true
+        // Cancel any in-flight probe; reconnect will beginRtcReprobe after reboot.
+        cancelRtcProbe()
         state.repairStatus = automatic
             ? "Reparando reloj — déjala en el cargador…"
             : "Reparando reloj — SET_CLOCK×3 + reboot (mejor en cargador)…"
@@ -1504,30 +1584,50 @@ extension BLEManager: CBPeripheralDelegate {
                 }
                 if frame.count > 4, frame[4] == 36 { handleAlarmCommandResponse(frame) }
                 router.handle(frame: frame)                       // UI (always)
-                if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue,
-                   let newest = BLEManager.dataRangeNewestUnix(from: frame) {
+                if frame.count > 6, frame[6] == WhoopCommand.getDataRange.rawValue {
                     let wall = Int(Date().timeIntervalSince1970)
-                    // Diagnostic: log the full stored-history window the strap reports.
                     let oldest = BLEManager.dataRangeOldestUnix(from: frame)
+                    let newest = BLEManager.dataRangeNewestUnix(from: frame)
                     let fmt = ISO8601DateFormatter()
                     let oldestStr = oldest.map { fmt.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? "n/a"
-                    let newestStr = fmt.string(from: Date(timeIntervalSince1970: TimeInterval(newest)))
+                    let newestStr = newest.map { fmt.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? "n/a"
                     log("DATA_RANGE strap window: oldest=\(oldestStr) newest=\(newestStr)")
-                    // Future markers (2029/2030) ⇒ CLOCK-LOST. Salvage remapped historical rows
-                    // first (type-47 absolute RTC), then SET_CLOCK + reboot to stop the bleeding.
-                    if ClockPolicy.isFutureCorrupt(strapNewest: newest, wallNow: wall) {
-                        strapNewestTs = nil
-                        rtcKnownCorrupt = true
-                        handleClockLost(newest: newest, oldest: oldest, wall: wall,
-                                        reason: "future_data_range")
-                    } else if ClockPolicy.isSaneWallRelative(newest, wallNow: wall) {
-                        strapNewestTs = newest
+                    if let newest {
+                        // Future markers (2029/2030) ⇒ CLOCK-LOST. Salvage remapped historical rows
+                        // first (type-47 absolute RTC), then SET_CLOCK + reboot to stop the bleeding.
+                        if ClockPolicy.isFutureCorrupt(strapNewest: newest, wallNow: wall) {
+                            strapNewestTs = nil
+                            rtcKnownCorrupt = true
+                            handleClockLost(newest: newest, oldest: oldest, wall: wall,
+                                            reason: "future_data_range")
+                        } else if ClockPolicy.isSaneWallRelative(newest, wallNow: wall) {
+                            strapNewestTs = newest
+                            markClockLossRecoveredIfNeeded(wall: wall)
+                        } else {
+                            // Absurdly old flash (idle / trimmed by official app). Not a future-corrupt
+                            // signal — if GET_CLOCK already latched wall RTC, lift the hold.
+                            strapNewestTs = nil
+                            log("DATA_RANGE newest too old vs wall — ignoring for liveness")
+                            if let ref = clockRef,
+                               ClockPolicy.isLatchedWallClock(deviceClock: ref.device, wallNow: wall) {
+                                markClockLossRecoveredIfNeeded(wall: wall)
+                            }
+                        }
+                    } else if let ref = clockRef,
+                              ClockPolicy.isLatchedWallClock(deviceClock: ref.device, wallNow: wall) {
+                        // Empty DATA_RANGE after official sync trim + latched RTC → resume live logging.
+                        log("DATA_RANGE empty markers — recovering via latched GET_CLOCK")
                         markClockLossRecoveredIfNeeded(wall: wall)
-                    } else {
-                        // Absurdly old — ignore for watchdog, don't auto-reboot (may be idle strap).
-                        strapNewestTs = nil
-                        log("DATA_RANGE newest too old vs wall — ignoring for liveness")
+                    } else if rtcAwaitingDataRangeProbe {
+                        extendRtcProbeAfterEmptyDataRange()
                     }
+                }
+                // Always log GET_CLOCK replies while probing/holding — silence here is the
+                // classic deep CLOCK-LOST symptom (no ack / unusable clock field).
+                if frame.count > 6, frame[6] == WhoopCommand.getClock.rawValue {
+                    let parsed = parseFrame(frame)
+                    let clockVal = parsed.parsed["clock"]?.intValue
+                    log("GET_CLOCK resp ok=\(parsed.ok) clock=\(clockVal.map(String.init) ?? "nil") len=\(frame.count)")
                 }
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
@@ -1538,6 +1638,11 @@ extension BLEManager: CBPeripheralDelegate {
                         collector?.clockRef = ref                  // unblocks buffered persistence
                         backfiller?.clockRef = ref                 // unblocks historical chunk decode
                         log("Clock correlated: device=\(ref.device) wall=\(ref.wall)")
+                        // Latched absolute RTC (official WHOOP / successful SET_CLOCK) clears hold
+                        // even before a sane DATA_RANGE arrives.
+                        if ClockPolicy.isLatchedWallClock(deviceClock: ref.device, wallNow: ref.wall) {
+                            markClockLossRecoveredIfNeeded(wall: ref.wall)
+                        }
                         // Conditional SET_CLOCK (mirrors WHOOP): only when the strap RTC has drifted /
                         // is frozen — not blindly every connect. Offload doesn't depend on this (it uses
                         // clockRef for decoding); SET_CLOCK only keeps FUTURE logging timestamps sane.
