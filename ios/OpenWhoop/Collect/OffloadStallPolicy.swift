@@ -38,7 +38,7 @@ enum OffloadStallPolicy {
     static let clockHoldBannerTitle = "Reloj de la pulsera perdido"
 
     static let clockHoldBannerBody =
-        "La pulsera no está grabando con un reloj válido. "
-        + "Déjala EN el cargador 10+ minutos, con la app abierta, y pulsa Reparar "
-        + "sin quitarla. Un soft reboot corto casi nunca engancha el RTC."
+        "La pulsera no graba con un reloj válido — por eso la descarga no avanza. "
+        + "OpenWhoop ya no reintenta sola. Déjala EN el cargador, pulsa Reparar una vez, "
+        + "y espera 10+ min sin quitarla. Si el mensaje no cae, el soft repair no basta."
 }
